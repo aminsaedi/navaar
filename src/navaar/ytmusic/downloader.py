@@ -45,11 +45,6 @@ class YTDownloader:
 
         if self._cookies_file and Path(self._cookies_file).exists():
             cmd.extend(["--cookies", self._cookies_file])
-        elif self._yt_client:
-            # Use OAuth access token from ytmusicapi for authentication
-            token = self._yt_client.get_access_token()
-            if token:
-                cmd.extend(["--add-header", f"Authorization:Bearer {token}"])
 
         cmd.append(url)
 
