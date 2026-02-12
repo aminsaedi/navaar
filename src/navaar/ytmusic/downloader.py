@@ -3,17 +3,27 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+if TYPE_CHECKING:
+    from navaar.ytmusic.client import YTMusicClient
 
 logger = structlog.get_logger()
 
 
 class YTDownloader:
-    def __init__(self, download_dir: str | None = None, cookies_file: str = "") -> None:
+    def __init__(
+        self,
+        download_dir: str | None = None,
+        cookies_file: str = "",
+        yt_client: YTMusicClient | None = None,
+    ) -> None:
         self._download_dir = download_dir or tempfile.mkdtemp(prefix="navaar_")
         self._cookies_file = cookies_file
+        self._yt_client = yt_client
         Path(self._download_dir).mkdir(parents=True, exist_ok=True)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
@@ -30,12 +40,18 @@ class YTDownloader:
             "--output", output_template,
             "--no-playlist",
             "--quiet",
-            "--js-runtimes", "nodejs",
-            url,
+            "--js-runtimes", "node",
         ]
+
         if self._cookies_file and Path(self._cookies_file).exists():
-            cmd.insert(-1, "--cookies")
-            cmd.insert(-1, self._cookies_file)
+            cmd.extend(["--cookies", self._cookies_file])
+        elif self._yt_client:
+            # Use OAuth access token from ytmusicapi for authentication
+            token = self._yt_client.get_access_token()
+            if token:
+                cmd.extend(["--add-header", f"Authorization:Bearer {token}"])
+
+        cmd.append(url)
 
         logger.info("yt_download_start", video_id=video_id)
         proc = await asyncio.create_subprocess_exec(

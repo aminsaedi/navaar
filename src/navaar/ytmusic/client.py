@@ -59,9 +59,12 @@ class YTMusicClient:
         self._save_token()
         logger.debug("oauth_token_refreshed")
 
-    def _headers(self) -> dict[str, str]:
+    def get_access_token(self) -> str:
         self._ensure_fresh_token()
-        return {"Authorization": f"Bearer {self._token['access_token']}"}
+        return self._token["access_token"]
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.get_access_token()}"}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
     def search_song(self, query: str, limit: int = 5) -> list[dict]:
