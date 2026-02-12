@@ -30,6 +30,7 @@ class YTDownloader:
             "--output", output_template,
             "--no-playlist",
             "--quiet",
+            "--js-runtimes", "nodejs",
             url,
         ]
         if self._cookies_file and Path(self._cookies_file).exists():
