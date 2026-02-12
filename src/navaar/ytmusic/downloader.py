@@ -35,6 +35,7 @@ class YTDownloader:
             "--no-playlist",
             "--quiet",
             "--js-runtimes", "node",
+            "--remote-components", "ejs:github",
         ]
 
         if self._cookies_file and Path(self._cookies_file).exists():
