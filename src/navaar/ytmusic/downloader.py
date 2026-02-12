@@ -11,8 +11,9 @@ logger = structlog.get_logger()
 
 
 class YTDownloader:
-    def __init__(self, download_dir: str | None = None) -> None:
+    def __init__(self, download_dir: str | None = None, cookies_file: str = "") -> None:
         self._download_dir = download_dir or tempfile.mkdtemp(prefix="navaar_")
+        self._cookies_file = cookies_file
         Path(self._download_dir).mkdir(parents=True, exist_ok=True)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
@@ -31,6 +32,9 @@ class YTDownloader:
             "--quiet",
             url,
         ]
+        if self._cookies_file and Path(self._cookies_file).exists():
+            cmd.insert(-1, "--cookies")
+            cmd.insert(-1, self._cookies_file)
 
         logger.info("yt_download_start", video_id=video_id)
         proc = await asyncio.create_subprocess_exec(

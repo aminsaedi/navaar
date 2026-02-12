@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     ytmusic_playlist_id: str = "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"
     ytmusic_client_id: str = ""
     ytmusic_client_secret: str = ""
+    ytdlp_cookies_file: str = ""
 
     sync_interval_tg_to_yt: int = 60
     sync_interval_yt_to_tg: int = 120
