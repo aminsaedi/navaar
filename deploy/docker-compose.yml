@@ -1,0 +1,18 @@
+services:
+  navaar:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - navaar-data:/data
+    env_file:
+      - ../.env
+    environment:
+      NAVAAR_DATABASE_URL: sqlite+aiosqlite:////data/navaar.db
+      NAVAAR_YTMUSIC_AUTH_FILE: /data/oauth.json
+
+volumes:
+  navaar-data:

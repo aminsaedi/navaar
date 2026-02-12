@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: navaar-config
+  namespace: navaar
+data:
+  NAVAAR_TELEGRAM_CHANNEL_ID: "-1003744100092"
+  NAVAAR_TELEGRAM_ADMIN_USER_IDS: "[701578028]"
+  NAVAAR_YTMUSIC_PLAYLIST_ID: "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"
+  NAVAAR_YTMUSIC_AUTH_FILE: "/data/oauth.json"
+  NAVAAR_SYNC_INTERVAL_TG_TO_YT: "60"
+  NAVAAR_SYNC_INTERVAL_YT_TO_TG: "120"
+  NAVAAR_MAX_RETRIES: "3"
+  NAVAAR_DATABASE_URL: "sqlite+aiosqlite:////data/navaar.db"
+  NAVAAR_API_PORT: "8080"
+  NAVAAR_LOG_LEVEL: "INFO"
