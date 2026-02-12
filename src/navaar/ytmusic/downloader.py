@@ -3,13 +3,9 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
-
-if TYPE_CHECKING:
-    from navaar.ytmusic.client import YTMusicClient
 
 logger = structlog.get_logger()
 
@@ -19,11 +15,9 @@ class YTDownloader:
         self,
         download_dir: str | None = None,
         cookies_file: str = "",
-        yt_client: YTMusicClient | None = None,
     ) -> None:
         self._download_dir = download_dir or tempfile.mkdtemp(prefix="navaar_")
         self._cookies_file = cookies_file
-        self._yt_client = yt_client
         Path(self._download_dir).mkdir(parents=True, exist_ok=True)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))

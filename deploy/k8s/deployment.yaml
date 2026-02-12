@@ -21,13 +21,8 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
+      nodeSelector:
+        kubernetes.io/hostname: thinkcentre
       containers:
         - name: navaar
           image: ghcr.io/aminsaedi/navaar:latest

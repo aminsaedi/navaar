@@ -68,7 +68,7 @@ async def run() -> None:
     logger.info("ytmusic_initialized", playlist_id=settings.ytmusic_playlist_id)
 
     # Downloader
-    downloader = YTDownloader(cookies_file=settings.ytdlp_cookies_file, yt_client=yt_client)
+    downloader = YTDownloader(cookies_file=settings.ytdlp_cookies_file)
 
     # Telegram bot app
     bot_app_builder = NavaarBot(
