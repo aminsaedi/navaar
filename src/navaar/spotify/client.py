@@ -2,29 +2,49 @@ from __future__ import annotations
 
 import structlog
 from spotipy import Spotify
-from spotipy.oauth2 import SpotifyOAuth
+from spotipy.oauth2 import SpotifyOAuth, SpotifyPKCE
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = structlog.get_logger()
+
+SCOPES = "playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public"
+
+# Well-known public client_id (no secret needed, PKCE flow)
+DEFAULT_CLIENT_ID = "5c098bcc800e45d49e476265bc9b6934"
+DEFAULT_REDIRECT_URI = "http://127.0.0.1:43019/redirect"
 
 
 class SpotifyClient:
     def __init__(
         self,
-        client_id: str,
-        client_secret: str,
-        redirect_uri: str,
         playlist_id: str,
+        client_id: str = "",
+        client_secret: str = "",
+        redirect_uri: str = "",
         cache_path: str = ".spotify_cache",
     ) -> None:
         self._playlist_id = playlist_id
-        auth_manager = SpotifyOAuth(
-            client_id=client_id,
-            client_secret=client_secret,
-            redirect_uri=redirect_uri,
-            scope="playlist-read-private playlist-modify-private playlist-modify-public",
-            cache_path=cache_path,
-        )
+
+        if client_secret:
+            # Full OAuth with own app (Premium account)
+            auth_manager = SpotifyOAuth(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri or "http://localhost:8888/callback",
+                scope=SCOPES,
+                cache_path=cache_path,
+            )
+            logger.info("spotify_auth_mode", mode="oauth")
+        else:
+            # PKCE flow with public client_id (no secret needed)
+            auth_manager = SpotifyPKCE(
+                client_id=client_id or DEFAULT_CLIENT_ID,
+                redirect_uri=redirect_uri or DEFAULT_REDIRECT_URI,
+                scope=SCOPES,
+                cache_path=cache_path,
+            )
+            logger.info("spotify_auth_mode", mode="pkce")
+
         self._sp = Spotify(auth_manager=auth_manager)
         logger.info("spotify_initialized", playlist_id=playlist_id)
 

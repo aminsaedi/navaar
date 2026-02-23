@@ -45,8 +45,8 @@ async def run() -> None:
 
     logger.info("navaar_starting", version="0.1.0")
 
-    # Detect Spotify availability
-    sp_enabled = bool(settings.spotify_client_id and settings.spotify_playlist_id)
+    # Detect Spotify availability (PKCE mode needs only playlist_id + cache)
+    sp_enabled = bool(settings.spotify_playlist_id)
 
     # Init metrics with all label combinations
     init_metrics(

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
-    spotify_redirect_uri: str = "http://localhost:8888/callback"
+    spotify_redirect_uri: str = ""
     spotify_cache_path: str = ".spotify_cache"
     spotify_playlist_id: str = ""
 
