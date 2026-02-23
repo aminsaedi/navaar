@@ -10,6 +10,7 @@ build/
 venv/
 .env
 oauth.json
+.spotify_cache
 *.db
 *.db-journal
 .pytest_cache/
