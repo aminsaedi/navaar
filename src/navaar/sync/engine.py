@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Callable
 
 import structlog
 
-from navaar.db.repository import SyncStateRepository
+from navaar.db.repository import SyncStateRepository, TrackRepository
 from navaar.metrics import (
+    ALL_DIRECTIONS,
     LAST_SYNC_DURATION,
     LAST_SYNC_PROCESSED,
     LAST_SYNC_TIMESTAMP,
@@ -20,9 +22,6 @@ from navaar.metrics import (
     TRACKS_SYNCED_GAUGE,
     TRACKS_TOTAL_GAUGE,
 )
-from navaar.db.repository import TrackRepository
-from navaar.sync.tg_to_yt import TgToYtSync
-from navaar.sync.yt_to_tg import YtToTgSync
 
 logger = structlog.get_logger()
 
@@ -30,42 +29,51 @@ logger = structlog.get_logger()
 class SyncEngine:
     def __init__(
         self,
-        tg_to_yt: TgToYtSync,
-        yt_to_tg: YtToTgSync,
+        sync_modules: dict[str, object],
+        intervals: dict[str, int],
         track_repo: TrackRepository,
         sync_state: SyncStateRepository,
-        tg_to_yt_interval: int = 60,
-        yt_to_tg_interval: int = 120,
     ) -> None:
-        self._tg_to_yt = tg_to_yt
-        self._yt_to_tg = yt_to_tg
         self._track_repo = track_repo
         self._sync_state = sync_state
-        self._tg_to_yt_interval = tg_to_yt_interval
-        self._yt_to_tg_interval = yt_to_tg_interval
         self._shutdown = asyncio.Event()
-        self._force_tg_to_yt = asyncio.Event()
-        self._force_yt_to_tg = asyncio.Event()
+        self._force_events: dict[str, asyncio.Event] = {
+            d: asyncio.Event() for d in sync_modules
+        }
+
+        # Build cycle methods: direction -> callable
+        self._cycle_methods: dict[str, Callable] = {}
+        self._intervals: dict[str, int] = {}
+        for direction, module in sync_modules.items():
+            if hasattr(module, "process_pending"):
+                self._cycle_methods[direction] = module.process_pending
+            elif hasattr(module, "process_new_tracks"):
+                self._cycle_methods[direction] = module.process_new_tracks
+            else:
+                raise ValueError(
+                    f"Module for {direction} has neither process_pending nor process_new_tracks"
+                )
+            self._intervals[direction] = intervals.get(direction, 120)
 
     def request_shutdown(self) -> None:
         self._shutdown.set()
 
     def force_sync(self, direction: str) -> None:
-        if direction == "tg_to_yt":
-            self._force_tg_to_yt.set()
-        elif direction == "yt_to_tg":
-            self._force_yt_to_tg.set()
+        if direction in self._force_events:
+            self._force_events[direction].set()
 
     async def run(self) -> None:
         logger.info("sync_engine_starting")
         await asyncio.gather(
-            self._run_loop("tg_to_yt", self._tg_to_yt_interval),
-            self._run_loop("yt_to_tg", self._yt_to_tg_interval),
+            *(
+                self._run_loop(d, self._intervals[d])
+                for d in self._cycle_methods
+            )
         )
         logger.info("sync_engine_stopped")
 
     async def _run_loop(self, direction: str, interval: int) -> None:
-        force_event = self._force_tg_to_yt if direction == "tg_to_yt" else self._force_yt_to_tg
+        force_event = self._force_events[direction]
         logger.info("sync_loop_started", direction=direction, interval=interval)
 
         while not self._shutdown.is_set():
@@ -105,10 +113,8 @@ class SyncEngine:
         SYNC_CYCLES.labels(direction=direction).inc()
         logger.debug("sync_cycle_start", direction=direction)
 
-        if direction == "tg_to_yt":
-            processed = await self._tg_to_yt.process_pending()
-        else:
-            processed = await self._yt_to_tg.process_new_tracks()
+        cycle_fn = self._cycle_methods[direction]
+        processed = await cycle_fn()
 
         elapsed = time.monotonic() - start
         SYNC_CYCLE_DURATION.labels(direction=direction).observe(elapsed)
@@ -133,7 +139,7 @@ class SyncEngine:
         counts = await self._track_repo.get_counts()
         total = 0
         total_synced = 0
-        for direction in ("tg_to_yt", "yt_to_tg"):
+        for direction in ALL_DIRECTIONS:
             statuses = counts.get(direction, {})
             pending = statuses.get("pending", 0) + statuses.get("retry_scheduled", 0)
             failed = statuses.get("failed", 0)

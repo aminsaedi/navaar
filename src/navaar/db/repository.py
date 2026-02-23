@@ -46,6 +46,24 @@ class TrackRepository:
             )
             return result.scalar_one_or_none()
 
+    async def get_track_by_sp_track_id(self, sp_track_id: str) -> Track | None:
+        async with self._sf() as session:
+            result = await session.execute(
+                select(Track).where(Track.sp_track_id == sp_track_id).limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_track_by_tg_file_id_and_direction(
+        self, file_id: str, direction: str
+    ) -> Track | None:
+        async with self._sf() as session:
+            result = await session.execute(
+                select(Track).where(
+                    Track.tg_file_id == file_id, Track.direction == direction
+                )
+            )
+            return result.scalar_one_or_none()
+
     async def get_pending_tracks(self, direction: str) -> list[Track]:
         async with self._sf() as session:
             result = await session.execute(
@@ -151,28 +169,26 @@ class TrackRepository:
                     )
                 )
             ).scalar() or 0
-            tg_to_yt = (
-                await session.execute(
-                    select(func.count(Track.id)).where(
-                        Track.direction == "tg_to_yt", Track.status == "synced"
+            # Per-direction synced counts
+            dir_synced = {}
+            for d in (
+                "tg_to_yt", "yt_to_tg", "tg_to_sp", "sp_to_tg", "yt_to_sp", "sp_to_yt"
+            ):
+                count = (
+                    await session.execute(
+                        select(func.count(Track.id)).where(
+                            Track.direction == d, Track.status == "synced"
+                        )
                     )
-                )
-            ).scalar() or 0
-            yt_to_tg = (
-                await session.execute(
-                    select(func.count(Track.id)).where(
-                        Track.direction == "yt_to_tg", Track.status == "synced"
-                    )
-                )
-            ).scalar() or 0
+                ).scalar() or 0
+                dir_synced[f"{d}_synced"] = count
             return {
                 "total": total,
                 "synced": synced,
                 "failed": failed,
                 "duplicates": duplicates,
                 "pending": pending,
-                "tg_to_yt_synced": tg_to_yt,
-                "yt_to_tg_synced": yt_to_tg,
+                **dir_synced,
                 "success_rate": round(synced / total * 100, 1) if total > 0 else 0.0,
             }
 

@@ -14,7 +14,7 @@ class Track(Base):
     __tablename__ = "tracks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    direction: Mapped[str] = mapped_column(String(10), nullable=False)  # tg_to_yt | yt_to_tg
+    direction: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     artist: Mapped[str | None] = mapped_column(String(500), nullable=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -23,6 +23,7 @@ class Track(Base):
     tg_file_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     tg_file_unique_id: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
     yt_video_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    sp_track_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
     yt_set_video_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -53,7 +54,7 @@ class SyncLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     track_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tracks.id"), nullable=True)
     event: Mapped[str] = mapped_column(String(50), nullable=False)
-    direction: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

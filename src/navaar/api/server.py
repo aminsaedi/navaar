@@ -8,7 +8,7 @@ from fastapi.responses import PlainTextResponse
 from prometheus_client import generate_latest
 
 from navaar.db.repository import SyncLogRepository, SyncStateRepository, TrackRepository
-from navaar.metrics import UP, UPTIME_SECONDS
+from navaar.metrics import ALL_DIRECTIONS, UP, UPTIME_SECONDS
 
 
 def create_app(
@@ -56,6 +56,7 @@ def create_app(
             "tg_file_unique_id": t.tg_file_unique_id,
             "yt_video_id": t.yt_video_id,
             "yt_set_video_id": t.yt_set_video_id,
+            "sp_track_id": t.sp_track_id,
             "duration_seconds": t.duration_seconds,
             "failure_reason": t.failure_reason,
             "retry_count": t.retry_count,
@@ -82,16 +83,15 @@ def create_app(
         stats = await track_repo.get_stats()
         uptime = round(time.time() - _start, 1)
         # Add sync timestamps
-        last_tg = None
-        last_yt = None
+        sync_times = {}
         if sync_state:
-            last_tg = await sync_state.get("last_tg_to_yt_sync")
-            last_yt = await sync_state.get("last_yt_to_tg_sync")
+            for d in ALL_DIRECTIONS:
+                val = await sync_state.get(f"last_{d}_sync")
+                sync_times[f"last_{d}_sync"] = float(val) if val else None
         return {
             **stats,
             "uptime_seconds": uptime,
-            "last_tg_to_yt_sync": float(last_tg) if last_tg else None,
-            "last_yt_to_tg_sync": float(last_yt) if last_yt else None,
+            **sync_times,
         }
 
     @app.get("/api/counts")
@@ -102,7 +102,9 @@ def create_app(
 
     @app.get("/api/tracks")
     async def api_tracks(
-        direction: str | None = Query(None, description="tg_to_yt or yt_to_tg"),
+        direction: str | None = Query(
+            None, description="tg_to_yt, yt_to_tg, tg_to_sp, sp_to_tg, yt_to_sp, or sp_to_yt"
+        ),
         status: str | None = Query(None, description="Filter by status"),
         limit: int = Query(50, ge=1, le=500),
     ) -> dict:
@@ -142,13 +144,14 @@ def create_app(
     async def api_pending() -> dict:
         if not track_repo:
             return {"error": "no_db"}
-        tg = await track_repo.get_pending_tracks("tg_to_yt")
-        yt = await track_repo.get_pending_tracks("yt_to_tg")
-        return {
-            "count": len(tg) + len(yt),
-            "tg_to_yt": [_track_to_dict(t) for t in tg],
-            "yt_to_tg": [_track_to_dict(t) for t in yt],
-        }
+        result: dict = {"count": 0}
+        total = 0
+        for d in ALL_DIRECTIONS:
+            pending = await track_repo.get_pending_tracks(d)
+            result[d] = [_track_to_dict(t) for t in pending]
+            total += len(pending)
+        result["count"] = total
+        return result
 
     @app.get("/api/logs")
     async def api_logs(
@@ -167,13 +170,17 @@ def create_app(
     async def api_sync_state() -> dict:
         if not sync_state:
             return {"error": "no_db"}
-        last_tg = await sync_state.get("last_tg_to_yt_sync")
-        last_yt = await sync_state.get("last_yt_to_tg_sync")
+        result = {}
+        for d in ALL_DIRECTIONS:
+            val = await sync_state.get(f"last_{d}_sync")
+            result[f"last_{d}_sync"] = float(val) if val else None
+
         yt_snapshot = await sync_state.get_json("yt_playlist_snapshot")
-        return {
-            "last_tg_to_yt_sync": float(last_tg) if last_tg else None,
-            "last_yt_to_tg_sync": float(last_yt) if last_yt else None,
-            "yt_playlist_track_count": len(yt_snapshot) if isinstance(yt_snapshot, list) else 0,
-        }
+        result["yt_playlist_track_count"] = len(yt_snapshot) if isinstance(yt_snapshot, list) else 0
+
+        sp_snapshot = await sync_state.get_json("sp_playlist_snapshot")
+        result["sp_playlist_track_count"] = len(sp_snapshot) if isinstance(sp_snapshot, list) else 0
+
+        return result
 
     return app

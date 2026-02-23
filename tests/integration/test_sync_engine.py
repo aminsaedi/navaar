@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -11,14 +11,14 @@ from navaar.sync.engine import SyncEngine
 
 @pytest.fixture
 def mock_tg_to_yt() -> MagicMock:
-    m = MagicMock()
+    m = MagicMock(spec=["process_pending"])
     m.process_pending = AsyncMock(return_value=0)
     return m
 
 
 @pytest.fixture
 def mock_yt_to_tg() -> MagicMock:
-    m = MagicMock()
+    m = MagicMock(spec=["process_new_tracks"])
     m.process_new_tracks = AsyncMock(return_value=0)
     return m
 
@@ -31,12 +31,10 @@ async def test_engine_starts_and_stops(
     mock_yt_to_tg: MagicMock,
 ) -> None:
     engine = SyncEngine(
-        tg_to_yt=mock_tg_to_yt,
-        yt_to_tg=mock_yt_to_tg,
+        sync_modules={"tg_to_yt": mock_tg_to_yt, "yt_to_tg": mock_yt_to_tg},
+        intervals={"tg_to_yt": 1, "yt_to_tg": 1},
         track_repo=track_repo,
         sync_state=sync_state_repo,
-        tg_to_yt_interval=1,
-        yt_to_tg_interval=1,
     )
 
     # Run engine for a short time then stop
@@ -59,12 +57,10 @@ async def test_force_sync(
     mock_yt_to_tg: MagicMock,
 ) -> None:
     engine = SyncEngine(
-        tg_to_yt=mock_tg_to_yt,
-        yt_to_tg=mock_yt_to_tg,
+        sync_modules={"tg_to_yt": mock_tg_to_yt, "yt_to_tg": mock_yt_to_tg},
+        intervals={"tg_to_yt": 60, "yt_to_tg": 60},
         track_repo=track_repo,
         sync_state=sync_state_repo,
-        tg_to_yt_interval=60,  # Long interval
-        yt_to_tg_interval=60,
     )
 
     async def force_and_stop() -> None:

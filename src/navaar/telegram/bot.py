@@ -20,6 +20,7 @@ from navaar.db.repository import SyncLogRepository, SyncStateRepository, TrackRe
 from navaar.metrics import RETRIES_TOTAL, TRACKS_DISCOVERED
 
 if TYPE_CHECKING:
+    from navaar.spotify.client import SpotifyClient
     from navaar.sync.engine import SyncEngine
     from navaar.ytmusic.client import YTMusicClient
 
@@ -40,6 +41,10 @@ _S = {
 _DIR = {
     "tg_to_yt": "\U0001f4e4 TG \u2192 YT",
     "yt_to_tg": "\U0001f4e5 YT \u2192 TG",
+    "tg_to_sp": "\U0001f4e4 TG \u2192 SP",
+    "sp_to_tg": "\U0001f4e5 SP \u2192 TG",
+    "yt_to_sp": "\U0001f3b5 YT \u2192 SP",
+    "sp_to_yt": "\U0001f3b5 SP \u2192 YT",
 }
 
 
@@ -52,6 +57,8 @@ def _track_line(t, verbose: bool = False) -> str:
         line += f"\n   {_DIR.get(t.direction, t.direction)} | {t.status}"
         if t.yt_video_id:
             line += f" | <code>{t.yt_video_id}</code>"
+        if t.sp_track_id:
+            line += f" | <code>{t.sp_track_id}</code>"
         if t.failure_reason:
             line += f"\n   Reason: <i>{html.escape(t.failure_reason[:80])}</i>"
     return line
@@ -85,6 +92,7 @@ class NavaarBot:
         sync_state: SyncStateRepository | None = None,
         sync_engine: SyncEngine | None = None,
         yt_client: YTMusicClient | None = None,
+        sp_client: SpotifyClient | None = None,
     ) -> None:
         self._token = token
         self._channel_id = channel_id
@@ -94,6 +102,8 @@ class NavaarBot:
         self._state = sync_state
         self._engine = sync_engine
         self._yt = yt_client
+        self._sp = sp_client
+        self._sp_enabled = sp_client is not None
         self._app: Application | None = None
         self._start_time = time.time()
 
@@ -147,6 +157,8 @@ class NavaarBot:
             return
 
         title = audio.title or audio.file_name or "Unknown"
+
+        # Create primary tg_to_yt track
         track = await self._tracks.create_track(
             direction="tg_to_yt",
             status="pending",
@@ -170,6 +182,23 @@ class NavaarBot:
         )
         logger.info("tg_track_created", track_id=track.id, title=title)
 
+        # Fan-out: also create tg_to_sp track if Spotify is enabled
+        if self._sp_enabled:
+            existing_sp = await self._tracks.get_track_by_tg_file_id_and_direction(
+                audio.file_id, "tg_to_sp"
+            )
+            if not existing_sp:
+                sp_track = await self._tracks.create_track(
+                    direction="tg_to_sp",
+                    status="pending",
+                    title=title,
+                    artist=audio.performer,
+                    tg_file_id=audio.file_id,
+                    duration_seconds=audio.duration,
+                )
+                TRACKS_DISCOVERED.labels(direction="tg_to_sp").inc()
+                logger.info("tg_to_sp_track_created", track_id=sp_track.id, title=title)
+
     # ── /start, /help ────────────────────────────────────────────────
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -180,6 +209,13 @@ class NavaarBot:
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             return
+        sp_cmds = ""
+        if self._sp_enabled:
+            sp_cmds = (
+                "/sync sp \u2014 Force SP\u2192TG + SP\u2192YT sync\n"
+                "/retry sp \u2014 Retry all failed SP tracks\n"
+                "/search_sp &lt;query&gt; \u2014 Search Spotify\n"
+            )
         text = (
             "<b>\U0001f3b5 Navaar \u2014 Bot Commands</b>\n"
             "\n"
@@ -192,9 +228,10 @@ class NavaarBot:
             "/logs [n] \u2014 Recent sync log entries\n"
             "\n"
             "<b>Actions</b>\n"
-            "/sync \u2014 Force immediate sync (both directions)\n"
+            "/sync \u2014 Force immediate sync (all directions)\n"
             "/sync tg \u2014 Force TG\u2192YT sync only\n"
             "/sync yt \u2014 Force YT\u2192TG sync only\n"
+            f"{sp_cmds}"
             "/retry &lt;id&gt; \u2014 Retry a single failed track\n"
             "/retry all \u2014 Retry all failed tracks\n"
             "/retry tg \u2014 Retry all failed TG\u2192YT\n"
@@ -203,7 +240,7 @@ class NavaarBot:
             "\n"
             "<b>Debugging</b>\n"
             "/search &lt;query&gt; \u2014 Search YouTube Music\n"
-            "/failed [tg|yt] \u2014 List failed tracks\n"
+            "/failed [tg|yt|sp] \u2014 List failed tracks\n"
             "/config \u2014 Show current configuration\n"
             "/ping \u2014 Check bot responsiveness\n"
             "/help \u2014 This message"
@@ -230,18 +267,28 @@ class NavaarBot:
         except Exception:
             await self._reply(update, "\u274c Could not load config.")
             return
-        text = (
-            "<b>\u2699\ufe0f Configuration</b>\n\n"
-            f"Channel: <code>{s.telegram_channel_id}</code>\n"
-            f"Playlist: <code>{s.ytmusic_playlist_id}</code>\n"
-            f"TG\u2192YT interval: {s.sync_interval_tg_to_yt}s\n"
-            f"YT\u2192TG interval: {s.sync_interval_yt_to_tg}s\n"
-            f"Max retries: {s.max_retries}\n"
-            f"Log level: {s.log_level}\n"
-            f"API port: {s.api_port}\n"
-            f"Admins: {list(s.telegram_admin_user_ids)}"
-        )
-        await self._reply(update, text)
+        lines = [
+            "<b>\u2699\ufe0f Configuration</b>\n",
+            f"Channel: <code>{s.telegram_channel_id}</code>",
+            f"YT Playlist: <code>{s.ytmusic_playlist_id}</code>",
+            f"TG\u2192YT interval: {s.sync_interval_tg_to_yt}s",
+            f"YT\u2192TG interval: {s.sync_interval_yt_to_tg}s",
+        ]
+        if s.spotify_playlist_id:
+            lines.extend([
+                f"SP Playlist: <code>{s.spotify_playlist_id}</code>",
+                f"TG\u2192SP interval: {s.sync_interval_tg_to_sp}s",
+                f"SP\u2192TG interval: {s.sync_interval_sp_to_tg}s",
+                f"YT\u2192SP interval: {s.sync_interval_yt_to_sp}s",
+                f"SP\u2192YT interval: {s.sync_interval_sp_to_yt}s",
+            ])
+        lines.extend([
+            f"Max retries: {s.max_retries}",
+            f"Log level: {s.log_level}",
+            f"API port: {s.api_port}",
+            f"Admins: {list(s.telegram_admin_user_ids)}",
+        ])
+        await self._reply(update, "\n".join(lines))
 
     # ── /status ──────────────────────────────────────────────────────
 
@@ -250,8 +297,6 @@ class NavaarBot:
             return
 
         counts = await self._tracks.get_counts()
-        last_tg = await self._state.get("last_tg_to_yt_sync") if self._state else None
-        last_yt = await self._state.get("last_yt_to_tg_sync") if self._state else None
 
         uptime = int(time.time() - self._start_time)
         h, m, s = uptime // 3600, (uptime % 3600) // 60, uptime % 60
@@ -262,15 +307,23 @@ class NavaarBot:
             "",
         ]
 
-        for direction, label in _DIR.items():
+        # Determine which directions to show
+        active_dirs = {"tg_to_yt": True, "yt_to_tg": True}
+        if self._sp_enabled:
+            active_dirs.update({
+                "tg_to_sp": True, "sp_to_tg": True,
+                "yt_to_sp": True, "sp_to_yt": True,
+            })
+
+        for direction in active_dirs:
+            label = _DIR.get(direction, direction)
             dc = counts.get(direction, {})
-            total_dir = sum(dc.values())
             synced = dc.get("synced", 0)
             failed = dc.get("failed", 0)
             pending = dc.get("pending", 0) + dc.get("retry_scheduled", 0)
             dupes = dc.get("duplicate", 0)
 
-            last_ts = last_tg if direction == "tg_to_yt" else last_yt
+            last_ts = await self._state.get(f"last_{direction}_sync") if self._state else None
             last_str = _ago(datetime.fromtimestamp(float(last_ts), tz=timezone.utc)) if last_ts else "never"
 
             lines.append(f"<b>{label}</b>  (last sync: {last_str})")
@@ -286,16 +339,22 @@ class NavaarBot:
             lines.append("  " + "  |  ".join(parts) if parts else "  No tracks")
             lines.append("")
 
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("\U0001f504 Sync TG\u2192YT", callback_data="sync_tg_to_yt"),
-                InlineKeyboardButton("\U0001f504 Sync YT\u2192TG", callback_data="sync_yt_to_tg"),
-            ],
-            [
-                InlineKeyboardButton("\U0001f4cb Failed", callback_data="show_failed"),
-                InlineKeyboardButton("\U0001f4ca Stats", callback_data="show_stats"),
-            ],
-        ])
+        buttons_row1 = [
+            InlineKeyboardButton("\U0001f504 Sync TG\u2192YT", callback_data="sync_tg_to_yt"),
+            InlineKeyboardButton("\U0001f504 Sync YT\u2192TG", callback_data="sync_yt_to_tg"),
+        ]
+        buttons_row2 = [
+            InlineKeyboardButton("\U0001f4cb Failed", callback_data="show_failed"),
+            InlineKeyboardButton("\U0001f4ca Stats", callback_data="show_stats"),
+        ]
+        rows = [buttons_row1]
+        if self._sp_enabled:
+            rows.append([
+                InlineKeyboardButton("\U0001f504 Sync SP\u2192TG", callback_data="sync_sp_to_tg"),
+                InlineKeyboardButton("\U0001f504 Sync SP\u2192YT", callback_data="sync_sp_to_yt"),
+            ])
+        rows.append(buttons_row2)
+        keyboard = InlineKeyboardMarkup(rows)
         await self._reply(update, "\n".join(lines), reply_markup=keyboard)
 
     # ── /stats ───────────────────────────────────────────────────────
@@ -309,11 +368,22 @@ class NavaarBot:
         filled = round(bar_len * synced_pct / 100) if stats["total"] else 0
         bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
 
+        synced_detail = (
+            f"{stats['tg_to_yt_synced']} TG\u2192YT, {stats['yt_to_tg_synced']} YT\u2192TG"
+        )
+        if self._sp_enabled:
+            synced_detail += (
+                f", {stats['tg_to_sp_synced']} TG\u2192SP"
+                f", {stats['sp_to_tg_synced']} SP\u2192TG"
+                f", {stats['yt_to_sp_synced']} YT\u2192SP"
+                f", {stats['sp_to_yt_synced']} SP\u2192YT"
+            )
+
         text = (
             "<b>\U0001f4c8 Statistics</b>\n\n"
             f"Total tracks: <b>{stats['total']}</b>\n"
             f"\u2705 Synced: <b>{stats['synced']}</b>  "
-            f"({stats['tg_to_yt_synced']} TG\u2192YT, {stats['yt_to_tg_synced']} YT\u2192TG)\n"
+            f"({synced_detail})\n"
             f"\u274c Failed: <b>{stats['failed']}</b>\n"
             f"\U0001f501 Duplicates: <b>{stats['duplicates']}</b>\n"
             f"\u23f3 Pending: <b>{stats['pending']}</b>\n"
@@ -327,9 +397,10 @@ class NavaarBot:
     async def _cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             return
-        pending_tg = await self._tracks.get_pending_tracks("tg_to_yt")
-        pending_yt = await self._tracks.get_pending_tracks("yt_to_tg")
-        all_pending = pending_tg + pending_yt
+        all_pending = []
+        for d in _DIR:
+            pending = await self._tracks.get_pending_tracks(d)
+            all_pending.extend(pending)
 
         if not all_pending:
             await self._reply(update, "\u2705 Queue is empty \u2014 nothing pending.")
@@ -400,6 +471,9 @@ class NavaarBot:
         if t.yt_video_id:
             lines.append(f"<b>YT Video:</b> <code>{t.yt_video_id}</code>")
             lines.append(f"<b>YT Link:</b> https://music.youtube.com/watch?v={t.yt_video_id}")
+        if t.sp_track_id:
+            lines.append(f"<b>SP Track:</b> <code>{t.sp_track_id}</code>")
+            lines.append(f"<b>SP Link:</b> https://open.spotify.com/track/{t.sp_track_id}")
         if t.tg_message_id:
             lines.append(f"<b>TG Message:</b> {t.tg_message_id}")
         if t.tg_file_unique_id:
@@ -459,7 +533,7 @@ class NavaarBot:
             lines.append(f"<code>{tid:>5}</code> {entry.event} {direction} <i>{_ago(entry.created_at)}</i>")
         await self._reply(update, "\n".join(lines))
 
-    # ── /failed [tg|yt] ─────────────────────────────────────────────
+    # ── /failed [tg|yt|sp] ──────────────────────────────────────────
 
     async def _cmd_failed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
@@ -467,12 +541,24 @@ class NavaarBot:
         direction = None
         if context.args:
             arg = context.args[0].lower()
-            if arg in ("tg", "tg_to_yt"):
-                direction = "tg_to_yt"
-            elif arg in ("yt", "yt_to_tg"):
-                direction = "yt_to_tg"
+            _dir_map = {
+                "tg": "tg_to_yt", "tg_to_yt": "tg_to_yt",
+                "yt": "yt_to_tg", "yt_to_tg": "yt_to_tg",
+                "sp": None,  # will get all SP directions
+                "tg_to_sp": "tg_to_sp", "sp_to_tg": "sp_to_tg",
+                "yt_to_sp": "yt_to_sp", "sp_to_yt": "sp_to_yt",
+            }
+            if arg == "sp":
+                # Show all Spotify-related failures
+                failed = []
+                for d in ("tg_to_sp", "sp_to_tg", "yt_to_sp", "sp_to_yt"):
+                    failed.extend(await self._tracks.get_failed_tracks(d))
+            else:
+                direction = _dir_map.get(arg)
+                failed = await self._tracks.get_failed_tracks(direction)
+        else:
+            failed = await self._tracks.get_failed_tracks(direction)
 
-        failed = await self._tracks.get_failed_tracks(direction)
         if not failed:
             await self._reply(update, "\u2705 No failed tracks!")
             return
@@ -488,7 +574,7 @@ class NavaarBot:
         ])
         await self._reply(update, "\n".join(lines), reply_markup=keyboard)
 
-    # ── /sync [tg|yt] ───────────────────────────────────────────────
+    # ── /sync [tg|yt|sp|all] ────────────────────────────────────────
 
     async def _cmd_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
@@ -497,34 +583,44 @@ class NavaarBot:
             await self._reply(update, "\u274c Sync engine not available.")
             return
 
-        arg = context.args[0].lower() if context.args else "both"
+        arg = context.args[0].lower() if context.args else "all"
         directions = []
         if arg in ("tg", "tg_to_yt"):
             directions = ["tg_to_yt"]
         elif arg in ("yt", "yt_to_tg"):
             directions = ["yt_to_tg"]
-        else:
+        elif arg == "sp":
+            directions = ["sp_to_tg", "sp_to_yt"]
+        elif arg == "all":
             directions = ["tg_to_yt", "yt_to_tg"]
+            if self._sp_enabled:
+                directions.extend(["tg_to_sp", "sp_to_tg", "yt_to_sp", "sp_to_yt"])
+        else:
+            # Try exact direction name
+            if arg in _DIR:
+                directions = [arg]
+            else:
+                directions = ["tg_to_yt", "yt_to_tg"]
 
         for d in directions:
             self._engine.force_sync(d)
 
-        labels = [_DIR[d] for d in directions]
+        labels = [_DIR.get(d, d) for d in directions]
         await self._reply(update, f"\U0001f504 Sync triggered: {', '.join(labels)}")
 
-    # ── /retry <id|all|tg|yt> ────────────────────────────────────────
+    # ── /retry <id|all|tg|yt|sp> ─────────────────────────────────────
 
     async def _cmd_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             return
         if not context.args:
-            await self._reply(update, "Usage: /retry &lt;id|all|tg|yt&gt;")
+            await self._reply(update, "Usage: /retry &lt;id|all|tg|yt|sp&gt;")
             return
 
         arg = context.args[0].lower()
         if arg == "all":
             count = await self._tracks.reset_all_failed()
-            for d in ("tg_to_yt", "yt_to_tg"):
+            for d in _DIR:
                 RETRIES_TOTAL.labels(direction=d).inc(count)
             await self._reply(update, f"\U0001f504 Reset {count} failed tracks for retry.")
         elif arg in ("tg", "tg_to_yt"):
@@ -535,11 +631,18 @@ class NavaarBot:
             count = await self._tracks.reset_all_failed("yt_to_tg")
             RETRIES_TOTAL.labels(direction="yt_to_tg").inc(count)
             await self._reply(update, f"\U0001f504 Reset {count} failed YT\u2192TG tracks.")
+        elif arg == "sp":
+            total = 0
+            for d in ("tg_to_sp", "sp_to_tg", "yt_to_sp", "sp_to_yt"):
+                count = await self._tracks.reset_all_failed(d)
+                RETRIES_TOTAL.labels(direction=d).inc(count)
+                total += count
+            await self._reply(update, f"\U0001f504 Reset {total} failed Spotify tracks.")
         else:
             try:
                 track_id = int(arg.lstrip("#"))
             except ValueError:
-                await self._reply(update, "\u274c Invalid. Use: /retry &lt;id|all|tg|yt&gt;")
+                await self._reply(update, "\u274c Invalid. Use: /retry &lt;id|all|tg|yt|sp&gt;")
                 return
             track = await self._tracks.get_track(track_id)
             if not track:
@@ -610,6 +713,41 @@ class NavaarBot:
             )
         await self._reply(update, "\n".join(lines))
 
+    # ── /search_sp <query> ───────────────────────────────────────────
+
+    async def _cmd_search_sp(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            return
+        if not context.args:
+            await self._reply(update, "Usage: /search_sp &lt;query&gt;")
+            return
+        if not self._sp:
+            await self._reply(update, "\u274c Spotify client not available.")
+            return
+
+        query = " ".join(context.args)
+        await self._reply(update, f"\U0001f50d Searching Spotify: <i>{html.escape(query)}</i>...")
+
+        try:
+            results = self._sp.search_track(query, limit=5)
+        except Exception as e:
+            await self._reply(update, f"\u274c Search failed: {html.escape(str(e)[:100])}")
+            return
+
+        if not results:
+            await self._reply(update, "No results found.")
+            return
+
+        lines = [f"<b>\U0001f3b6 Spotify Results for: {html.escape(query)}</b>\n"]
+        for i, r in enumerate(results, 1):
+            artists = ", ".join(r.get("artists", []))
+            tid = r.get("id", "?")
+            lines.append(
+                f"{i}. {html.escape(artists)} \u2014 {html.escape(r.get('name', '?'))}\n"
+                f"   <code>{tid}</code>"
+            )
+        await self._reply(update, "\n".join(lines))
+
     # ── Inline button callbacks ──────────────────────────────────────
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -621,17 +759,14 @@ class NavaarBot:
         data = query.data
         await query.answer()
 
-        if data == "sync_tg_to_yt":
+        if data.startswith("sync_") and not data.startswith("sync_tg") and not data.startswith("sync_yt") and not data.startswith("sync_sp"):
+            pass  # fall through
+        elif data in ("sync_tg_to_yt", "sync_yt_to_tg", "sync_sp_to_tg", "sync_sp_to_yt"):
             if self._engine:
-                self._engine.force_sync("tg_to_yt")
+                self._engine.force_sync(data.removeprefix("sync_"))
+                label = _DIR.get(data.removeprefix("sync_"), data)
                 await query.message.reply_text(
-                    "\U0001f504 TG\u2192YT sync triggered!", parse_mode="HTML"
-                )
-        elif data == "sync_yt_to_tg":
-            if self._engine:
-                self._engine.force_sync("yt_to_tg")
-                await query.message.reply_text(
-                    "\U0001f504 YT\u2192TG sync triggered!", parse_mode="HTML"
+                    f"\U0001f504 {label} sync triggered!", parse_mode="HTML"
                 )
         elif data == "show_failed":
             await self._cmd_failed(update, context)
@@ -639,7 +774,7 @@ class NavaarBot:
             await self._cmd_stats(update, context)
         elif data == "retry_all":
             count = await self._tracks.reset_all_failed()
-            for d in ("tg_to_yt", "yt_to_tg"):
+            for d in _DIR:
                 RETRIES_TOTAL.labels(direction=d).inc(count)
             await query.message.reply_text(
                 f"\U0001f504 Reset {count} failed tracks for retry.", parse_mode="HTML"
@@ -708,6 +843,7 @@ class NavaarBot:
             "retry": self._cmd_retry,
             "delete": self._cmd_delete,
             "search": self._cmd_search,
+            "search_sp": self._cmd_search_sp,
         }
         for name, handler in commands.items():
             self._app.add_handler(CommandHandler(name, handler))

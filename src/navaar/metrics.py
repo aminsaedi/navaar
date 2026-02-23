@@ -1,5 +1,9 @@
 from prometheus_client import Counter, Gauge, Histogram, Info
 
+ALL_DIRECTIONS = (
+    "tg_to_yt", "yt_to_tg", "tg_to_sp", "sp_to_tg", "yt_to_sp", "sp_to_yt"
+)
+
 # ── Info ──────────────────────────────────────────────────────────────
 
 SERVICE_INFO = Info(
@@ -62,6 +66,11 @@ YT_DOWNLOAD_TOTAL = Counter(
 TG_DOWNLOAD_TOTAL = Counter(
     "navaar_tg_download_total",
     "Telegram download results",
+    ["result"],
+)
+SP_SEARCH_TOTAL = Counter(
+    "navaar_sp_search_total",
+    "Spotify search results",
     ["result"],
 )
 
@@ -138,15 +147,28 @@ YT_SEARCH_DURATION = Histogram(
     "Duration of YouTube Music searches",
     buckets=(0.5, 1, 2, 5, 10),
 )
+SP_SEARCH_DURATION = Histogram(
+    "navaar_sp_search_duration_seconds",
+    "Duration of Spotify searches",
+    buckets=(0.5, 1, 2, 5, 10),
+)
 
 
 # ── Initialization ───────────────────────────────────────────────────
 
-def init_metrics(version: str = "0.1.0", playlist_id: str = "") -> None:
+def init_metrics(
+    version: str = "0.1.0",
+    playlist_id: str = "",
+    sp_playlist_id: str = "",
+) -> None:
     """Pre-initialize all label combinations so they appear in /metrics from startup."""
-    SERVICE_INFO.info({"version": version, "playlist_id": playlist_id})
+    SERVICE_INFO.info({
+        "version": version,
+        "playlist_id": playlist_id,
+        "sp_playlist_id": sp_playlist_id,
+    })
 
-    for direction in ("tg_to_yt", "yt_to_tg"):
+    for direction in ALL_DIRECTIONS:
         SYNC_CYCLES.labels(direction=direction)
         TRACKS_DISCOVERED.labels(direction=direction)
         TRACKS_SYNCED.labels(direction=direction)
@@ -162,16 +184,17 @@ def init_metrics(version: str = "0.1.0", playlist_id: str = "") -> None:
         SYNC_CYCLE_DURATION.labels(direction=direction)
         TRACK_SYNC_DURATION.labels(direction=direction)
 
-    for error_type in ("no_yt_match", "unexpected", "cycle_crash",
+    for error_type in ("no_yt_match", "no_sp_match", "unexpected", "cycle_crash",
                         "sync_failed", "retry_failed", "download_failed", "upload_failed"):
-        for direction in ("tg_to_yt", "yt_to_tg"):
+        for direction in ALL_DIRECTIONS:
             SYNC_ERRORS.labels(direction=direction, error_type=error_type)
 
-    for method in ("id3", "tg_metadata", "filename"):
+    for method in ("id3", "tg_metadata", "filename", "yt_metadata", "sp_metadata"):
         IDENTIFICATION_TOTAL.labels(method=method)
 
     for result in ("found", "not_found"):
         YT_SEARCH_TOTAL.labels(result=result)
+        SP_SEARCH_TOTAL.labels(result=result)
 
     for result in ("success", "failure"):
         TG_UPLOAD_TOTAL.labels(result=result)

@@ -45,8 +45,15 @@ async def run() -> None:
 
     logger.info("navaar_starting", version="0.1.0")
 
+    # Detect Spotify availability
+    sp_enabled = bool(settings.spotify_client_id and settings.spotify_playlist_id)
+
     # Init metrics with all label combinations
-    init_metrics(version="0.1.0", playlist_id=settings.ytmusic_playlist_id)
+    init_metrics(
+        version="0.1.0",
+        playlist_id=settings.ytmusic_playlist_id,
+        sp_playlist_id=settings.spotify_playlist_id if sp_enabled else "",
+    )
 
     # Init database
     await init_db(settings.database_url)
@@ -70,6 +77,20 @@ async def run() -> None:
     # Downloader
     downloader = YTDownloader(cookies_file=settings.ytdlp_cookies_file)
 
+    # Spotify client (conditional)
+    sp_client = None
+    if sp_enabled:
+        from navaar.spotify.client import SpotifyClient
+
+        sp_client = SpotifyClient(
+            client_id=settings.spotify_client_id,
+            client_secret=settings.spotify_client_secret,
+            redirect_uri=settings.spotify_redirect_uri,
+            playlist_id=settings.spotify_playlist_id,
+            cache_path=settings.spotify_cache_path,
+        )
+        logger.info("spotify_initialized", playlist_id=settings.spotify_playlist_id)
+
     # Telegram bot app
     bot_app_builder = NavaarBot(
         token=settings.telegram_bot_token,
@@ -79,6 +100,7 @@ async def run() -> None:
         sync_log=sync_log,
         sync_state=sync_state,
         yt_client=yt_client,
+        sp_client=sp_client,
     )
     tg_app = bot_app_builder.build_app()
 
@@ -87,16 +109,52 @@ async def run() -> None:
 
     # Sync modules
     tg_to_yt = TgToYtSync(track_repo, sync_log, tg_client, yt_client)
-    yt_to_tg = YtToTgSync(track_repo, sync_state, sync_log, tg_client, yt_client, downloader)
+    yt_to_tg = YtToTgSync(
+        track_repo, sync_state, sync_log, tg_client, yt_client, downloader,
+        sp_enabled=sp_enabled,
+    )
+
+    sync_modules: dict[str, object] = {
+        "tg_to_yt": tg_to_yt,
+        "yt_to_tg": yt_to_tg,
+    }
+    intervals: dict[str, int] = {
+        "tg_to_yt": settings.sync_interval_tg_to_yt,
+        "yt_to_tg": settings.sync_interval_yt_to_tg,
+    }
+
+    if sp_client:
+        from navaar.sync.sp_to_tg import SpToTgSync
+        from navaar.sync.sp_to_yt import SpToYtSync
+        from navaar.sync.tg_to_sp import TgToSpSync
+        from navaar.sync.yt_to_sp import YtToSpSync
+
+        tg_to_sp = TgToSpSync(track_repo, sync_log, tg_client, sp_client)
+        sp_to_tg = SpToTgSync(
+            track_repo, sync_state, sync_log, tg_client, sp_client, yt_client, downloader
+        )
+        yt_to_sp = YtToSpSync(track_repo, sync_log, yt_client, sp_client)
+        sp_to_yt = SpToYtSync(track_repo, sync_log, sp_client, yt_client)
+
+        sync_modules.update({
+            "tg_to_sp": tg_to_sp,
+            "sp_to_tg": sp_to_tg,
+            "yt_to_sp": yt_to_sp,
+            "sp_to_yt": sp_to_yt,
+        })
+        intervals.update({
+            "tg_to_sp": settings.sync_interval_tg_to_sp,
+            "sp_to_tg": settings.sync_interval_sp_to_tg,
+            "yt_to_sp": settings.sync_interval_yt_to_sp,
+            "sp_to_yt": settings.sync_interval_sp_to_yt,
+        })
 
     # Sync engine
     engine = SyncEngine(
-        tg_to_yt=tg_to_yt,
-        yt_to_tg=yt_to_tg,
+        sync_modules=sync_modules,
+        intervals=intervals,
         track_repo=track_repo,
         sync_state=sync_state,
-        tg_to_yt_interval=settings.sync_interval_tg_to_yt,
-        yt_to_tg_interval=settings.sync_interval_yt_to_tg,
     )
     bot_app_builder.set_sync_engine(engine)
 

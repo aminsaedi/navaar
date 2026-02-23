@@ -17,8 +17,18 @@ class Settings(BaseSettings):
     ytmusic_client_secret: str = ""
     ytdlp_cookies_file: str = ""
 
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
+    spotify_redirect_uri: str = "http://localhost:8888/callback"
+    spotify_cache_path: str = ".spotify_cache"
+    spotify_playlist_id: str = ""
+
     sync_interval_tg_to_yt: int = 60
     sync_interval_yt_to_tg: int = 120
+    sync_interval_tg_to_sp: int = 60
+    sync_interval_sp_to_tg: int = 120
+    sync_interval_yt_to_sp: int = 120
+    sync_interval_sp_to_yt: int = 120
     max_retries: int = 3
 
     database_url: str = "sqlite+aiosqlite:///navaar.db"
