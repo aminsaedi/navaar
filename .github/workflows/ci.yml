@@ -37,7 +37,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write  # commit the pinned image tag back to main
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -71,3 +71,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # GitOps pin: after the SHA-tagged image is in the registry, rewrite the
+      # kustomize image tag to this commit and push it back to main. ArgoCD then
+      # syncs the manifest and the exact image it references together — closing the
+      # window where a manifest change could roll out against a stale :latest.
+      # Pushes made with GITHUB_TOKEN don't re-trigger workflows; [skip ci] is belt
+      # and suspenders.
+      - name: Pin image to commit SHA
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          sed -i -E "s/^(\s*newTag:).*/\1 ${short_sha}/" deploy/k8s/kustomization.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- deploy/k8s/kustomization.yaml; then
+            echo "Image tag already pinned to ${short_sha}; nothing to commit."
+            exit 0
+          fi
+          git add deploy/k8s/kustomization.yaml
+          git commit -m "ci: pin image to ${short_sha} [skip ci]"
+          git push origin HEAD:main

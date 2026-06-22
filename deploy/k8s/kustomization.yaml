@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ArgoCD points at deploy/k8s and auto-detects this file, switching to kustomize.
+# Every raw manifest in this directory must be listed here to stay deployed.
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - backup-cronjob.yaml
+
+# The image tag is pinned to the exact commit that built it. CI rewrites `newTag`
+# (the `ci: pin image to <sha>` commit) AFTER pushing the image, so the manifest
+# and the image it references always land together — no window where a manifest
+# change applies against a stale `:latest`. `newTag: latest` is only the seed value
+# for a fresh clone; the next CI run overwrites it with the 7-char commit SHA.
+images:
+  - name: ghcr.io/aminsaedi/navaar
+    newTag: latest

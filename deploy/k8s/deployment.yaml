@@ -43,8 +43,10 @@ spec:
               mountPath: /data
       containers:
         - name: navaar
+          # Tag is pinned to the build's commit SHA by kustomization.yaml (CI rewrites
+          # `newTag`). Immutable per-commit, so IfNotPresent avoids needless re-pulls.
           image: ghcr.io/aminsaedi/navaar:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
           ports:
