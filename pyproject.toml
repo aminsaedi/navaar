@@ -4,8 +4,12 @@ version = "0.1.0"
 description = "Bidirectional music sync between Telegram channel and YouTube Music playlist"
 requires-python = ">=3.12"
 dependencies = [
-    "ytmusicapi>=1.8.0",
-    "python-telegram-bot>=21.0",
+    # Upper bounds on the API-coupled clients: their internal call signatures drift
+    # between majors (e.g. spotipy removed get_access_token(as_dict=) which broke the
+    # PKCE auth path). yt-dlp is intentionally floor-only — it breaks *backwards* as
+    # sites change, so it must stay free to float (refresh via the lockfile).
+    "ytmusicapi>=1.8.0,<2",
+    "python-telegram-bot>=21.0,<23",
     "yt-dlp>=2024.1.0",
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20.0",
@@ -17,7 +21,7 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "structlog>=24.4.0",
     "httpx>=0.27.0",
-    "spotipy>=2.24.0",
+    "spotipy>=2.25.2,<3",
 ]
 
 [project.scripts]
@@ -34,6 +38,22 @@ packages = ["src/navaar"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# E/F: pyflakes+pycodestyle errors, I: import sorting, B: bugbear,
+# UP: pyupgrade, ASYNC: async-specific lints (e.g. blocking calls in async code).
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+ignore = ["E501"]  # line length handled by formatter, not enforced hard
+
+[tool.ruff.lint.per-file-ignores]
+# These do cheap *local* filesystem ops (stat/glob/open-to-upload), not the
+# event-loop-blocking network I/O the ASYNC rules are meant to catch.
+"src/navaar/ytmusic/downloader.py" = ["ASYNC240"]
+"src/navaar/telegram/client.py" = ["ASYNC230", "ASYNC240"]
 
 [dependency-groups]
 dev = [

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -41,10 +41,35 @@ class TrackRepository:
 
     async def get_track_by_yt_video_id(self, video_id: str) -> Track | None:
         async with self._sf() as session:
+            # .limit(1): fan-out creates multiple rows sharing a yt_video_id
+            # (e.g. yt_to_tg + yt_to_sp), so a plain scalar_one_or_none would
+            # raise MultipleResultsFound if the snapshot is ever re-diffed.
             result = await session.execute(
-                select(Track).where(Track.yt_video_id == video_id)
+                select(Track).where(Track.yt_video_id == video_id).limit(1)
             )
             return result.scalar_one_or_none()
+
+    async def has_track_for_direction(
+        self,
+        direction: str,
+        *,
+        yt_video_id: str | None = None,
+        sp_track_id: str | None = None,
+        tg_file_id: str | None = None,
+    ) -> bool:
+        """Cross-service fan-out dedup: is there already a track for `direction`
+        keyed by the given external id? Used to avoid creating duplicate fan-out
+        rows (and sync loops)."""
+        conds = [Track.direction == direction]
+        if yt_video_id is not None:
+            conds.append(Track.yt_video_id == yt_video_id)
+        if sp_track_id is not None:
+            conds.append(Track.sp_track_id == sp_track_id)
+        if tg_file_id is not None:
+            conds.append(Track.tg_file_id == tg_file_id)
+        async with self._sf() as session:
+            result = await session.execute(select(Track.id).where(*conds).limit(1))
+            return result.first() is not None
 
     async def get_track_by_sp_track_id(self, sp_track_id: str) -> Track | None:
         async with self._sf() as session:
@@ -94,7 +119,7 @@ class TrackRepository:
         return await self.update_track(
             track_id,
             status="synced",
-            synced_at=datetime.now(timezone.utc),
+            synced_at=datetime.now(UTC),
             **extra,
         )
 

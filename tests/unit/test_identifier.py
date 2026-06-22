@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from navaar.sync.identifier import (
     identify_from_filename,
     identify_from_tg_metadata,

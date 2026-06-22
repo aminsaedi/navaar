@@ -4,7 +4,7 @@ import json
 import time
 
 from fastapi import FastAPI, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import generate_latest
 
 from navaar.db.repository import SyncLogRepository, SyncStateRepository, TrackRepository
@@ -16,21 +16,47 @@ def create_app(
     sync_state: SyncStateRepository | None = None,
     sync_log: SyncLogRepository | None = None,
     start_time: float | None = None,
+    intervals: dict[str, int] | None = None,
+    stale_multiplier: int = 5,
 ) -> FastAPI:
     app = FastAPI(title="Navaar API", docs_url="/docs", redoc_url=None)
     _start = start_time or time.time()
+    _intervals = intervals or {}
 
     # ── Health / Metrics ──────────────────────────────────────────────
 
     @app.get("/healthz")
     async def healthz() -> dict:
+        # Liveness: cheap and lenient. A single degraded direction must NOT
+        # restart the whole pod (a restart won't fix a revoked token anyway).
         return {"status": "ok"}
 
     @app.get("/readyz")
-    async def readyz() -> dict:
+    async def readyz() -> JSONResponse:
+        # Readiness reflects sync health: a direction that stops completing cycles
+        # (e.g. a crash loop) goes stale and flips the pod NotReady, making the
+        # outage visible to k8s/alerting instead of a silently-Ready pod.
         if not track_repo:
-            return {"status": "error", "reason": "no_db"}
-        return {"status": "ok"}
+            return JSONResponse({"status": "error", "reason": "no_db"}, status_code=503)
+
+        stale: list[str] = []
+        if sync_state and _intervals:
+            now = time.time()
+            for direction, interval in _intervals.items():
+                threshold = interval * stale_multiplier
+                val = await sync_state.get(f"last_{direction}_sync")
+                # No timestamp yet => use process start as the baseline, so a
+                # direction that has never completed a cycle since boot still
+                # goes stale after the grace window (catches crash-from-boot).
+                reference = float(val) if val else _start
+                if now - reference > threshold:
+                    stale.append(direction)
+
+        if stale:
+            return JSONResponse(
+                {"status": "degraded", "stale": stale}, status_code=503
+            )
+        return JSONResponse({"status": "ok"})
 
     @app.get("/metrics")
     async def metrics() -> PlainTextResponse:

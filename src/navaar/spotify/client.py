@@ -5,6 +5,8 @@ from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth, SpotifyPKCE
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from navaar.auth_errors import retry_if_transient
+
 logger = structlog.get_logger()
 
 SCOPES = "playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public"
@@ -48,7 +50,7 @@ class SpotifyClient:
         self._sp = Spotify(auth_manager=auth_manager)
         logger.info("spotify_initialized", playlist_id=playlist_id)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
     def search_track(self, query: str, limit: int = 5) -> list[dict]:
         results = self._sp.search(q=query, type="track", limit=limit)
         tracks = results.get("tracks", {}).get("items", [])
@@ -63,7 +65,7 @@ class SpotifyClient:
             for t in tracks
         ]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
     def get_playlist_tracks(self) -> list[dict]:
         tracks: list[dict] = []
         results = self._sp.playlist_items(
@@ -89,7 +91,7 @@ class SpotifyClient:
         logger.debug("sp_playlist_fetched", track_count=len(tracks))
         return tracks
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
     def add_to_playlist(self, track_id: str) -> None:
         self._sp.playlist_add_items(self._playlist_id, [track_id])
         logger.info("sp_added_to_playlist", track_id=track_id)

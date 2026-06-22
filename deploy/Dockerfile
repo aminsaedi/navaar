@@ -22,4 +22,6 @@ VOLUME ["/data"]
 ENV NAVAAR_DATABASE_URL=sqlite+aiosqlite:////data/navaar.db
 ENV NAVAAR_YTMUSIC_AUTH_FILE=/data/oauth.json
 
-CMD ["uv", "run", "python", "-m", "navaar"]
+# Run the venv interpreter directly: works regardless of runtime uid (k8s runs
+# this as a non-root user) and avoids `uv run` needing a writable cache at start.
+CMD ["/app/.venv/bin/python", "-m", "navaar"]

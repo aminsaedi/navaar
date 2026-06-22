@@ -53,7 +53,7 @@ async def test_process_pending_syncs_track(
         tg_file_id="file_123",
     )
 
-    with patch("navaar.sync.tg_to_yt.identify_track") as mock_identify:
+    with patch("navaar.sync._base_push.identify_track") as mock_identify:
         mock_identify.return_value = MagicMock(
             artist="Adele", title="Hello", method="tg_metadata"
         )
@@ -82,7 +82,7 @@ async def test_process_pending_no_match(
         tg_file_id="file_456",
     )
 
-    with patch("navaar.sync.tg_to_yt.identify_track") as mock_identify:
+    with patch("navaar.sync._base_push.identify_track") as mock_identify:
         mock_identify.return_value = MagicMock(
             artist=None, title="asdfghjkl", method="filename"
         )
@@ -112,7 +112,7 @@ async def test_process_pending_duplicate(
         tg_file_id="file_789",
     )
 
-    with patch("navaar.sync.tg_to_yt.identify_track") as mock_identify:
+    with patch("navaar.sync._base_push.identify_track") as mock_identify:
         mock_identify.return_value = MagicMock(
             artist="Adele", title="Hello", method="tg_metadata"
         )

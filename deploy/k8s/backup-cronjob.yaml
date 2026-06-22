@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: navaar-backup
+  namespace: navaar
+  labels:
+    app: navaar
+spec:
+  # Daily at 03:17 (off the :00 mark). Uses SQLite's online .backup API, which is
+  # safe to run while the app is writing.
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: navaar
+        spec:
+          restartPolicy: OnFailure
+          # Same node as the deployment: the local-path PVC is ReadWriteOnce, so
+          # the backup pod must co-locate to mount it.
+          nodeSelector:
+            kubernetes.io/hostname: thinkcentre
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          containers:
+            - name: backup
+              image: python:3.12-slim
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  ts=$(date +%Y%m%d-%H%M%S)
+                  mkdir -p /data/backups
+                  python -c "import sqlite3; s=sqlite3.connect('/data/navaar.db'); d=sqlite3.connect('/data/backups/navaar-$ts.db'); s.backup(d); d.close(); s.close()"
+                  echo "backup written: navaar-$ts.db"
+                  # Keep the 14 most recent backups.
+                  ls -1t /data/backups/navaar-*.db | tail -n +15 | xargs -r rm -f
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: navaar-data

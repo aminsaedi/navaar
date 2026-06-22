@@ -4,8 +4,8 @@ import tempfile
 from pathlib import Path
 
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
 from telegram import Bot
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from navaar.metrics import TG_DOWNLOAD_TOTAL
 

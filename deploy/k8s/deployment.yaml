@@ -23,10 +23,30 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: thinkcentre
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        # Normalize /data ownership to the runtime uid. Self-heals the ownership
+        # drift that `kubectl cp` (which writes as the local user's uid) leaves
+        # behind — previously this had to be chowned by hand after each copy.
+        - name: fix-perms
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1000:1000 /data || true"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: navaar
           image: ghcr.io/aminsaedi/navaar:latest
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 8080
               name: http

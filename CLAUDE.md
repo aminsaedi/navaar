@@ -73,24 +73,63 @@ Force-sync from bot commands interrupts the sleep per-direction. Shutdown via SI
 
 ### Sync Module Patterns
 
+The six sync modules are thin subclasses over two shared base classes. The concrete
+modules (e.g. `tg_to_yt.py`) are ~20 lines: they set class attributes and wire clients.
+
 **Push-based** (`process_pending()`): tg_to_yt, tg_to_sp, yt_to_sp, sp_to_yt
+- `BasePushSync` (`sync/_base_push.py`) holds the whole flow. Per-service differences
+  live in a `TargetAdapter` (`sync/_targets.py`: `YT_TARGET`/`SP_TARGET`) — match id/name
+  keys, db field, no-match reason, search metrics. Subclasses set `direction`, `target`,
+  and `identify_from_telegram` (tg_* download+identify the audio first).
 - Fetch pending tracks from DB → identify/search → add to target service → mark synced/failed
 
 **Pull-based** (`process_new_tracks()`): yt_to_tg, sp_to_tg
+- `BasePullSync` (`sync/_base_pull.py`) holds the retry-then-snapshot-diff skeleton plus the
+  shared `_download_and_upload()` (yt-dlp download → Telegram upload → mark synced). Subclasses
+  implement `_retry_track`/`_sync_new` and set `snapshot_key`/`id_key`/`id_field`.
 - Phase 1: retry previously failed tracks
 - Phase 2: fetch playlist, diff against stored snapshot (in SyncState), process new IDs
 - Snapshots stored as JSON in SyncState (`yt_playlist_snapshot`, `sp_playlist_snapshot`)
+
+**Blocking clients**: spotipy/ytmusic methods are synchronous; the base classes call them via
+`asyncio.to_thread(...)` so a slow/backed-off external call can't stall the event loop (and the
+other five loops, the bot, and `/healthz`).
 
 **Download flows**: sp_to_tg and yt_to_tg both download audio via yt-dlp (YouTube). Spotify has no audio download API, so sp_to_tg searches YouTube for the same track and downloads from there.
 
 ### Fan-Out Strategy
 
-When a track arrives from any source, tracks are created for ALL other targets:
-- TG channel post → creates `tg_to_yt` + `tg_to_sp` (if SP enabled)
-- YT playlist new track → creates `yt_to_tg` + `yt_to_sp` (if SP enabled, via `sp_enabled` flag on YtToTgSync)
-- SP playlist new track → creates `sp_to_tg` + `sp_to_yt` (unconditional in SpToTgSync)
+When a track arrives from any source, tracks are created for ALL other targets. The
+secondary-target creation is centralized in `FanOut` (`sync/fanout.py`) with one consistent
+dedup rule (`TrackRepository.has_track_for_direction`); the caller creates the primary/source
+track (already deduped) itself:
+- TG channel post → bot creates `tg_to_yt`, then `FanOut.from_telegram` → `tg_to_sp` (if SP enabled)
+- YT playlist new track → `yt_to_tg` created, then `FanOut.from_youtube` → `yt_to_sp` (if SP enabled)
+- SP playlist new track → `sp_to_tg` created, then `FanOut.from_spotify` → `sp_to_yt`
 
-Cross-service dedup prevents loops: if a track already exists with the same `yt_video_id` or `sp_track_id` in a synced state, the fan-out skips creating duplicates.
+Cross-service dedup prevents loops: `has_track_for_direction` checks whether a track already
+exists for the target direction keyed by the same external id before creating a fan-out row.
+
+### Resilience & Alerting
+
+- **Auth errors** (`auth_errors.py`): permanent failures (401/403/`invalid_grant`/revoked) are
+  classified centrally. Tenacity uses `retry_if_transient` so the clients don't waste attempts
+  retrying a revoked token. The engine's crash handler classifies the service, increments
+  `AUTH_ERRORS{service}`, and tags the error `auth_error` (vs `cycle_crash`).
+- **Engine backoff/circuit breaker**: `SyncEngine` tracks consecutive failures per direction,
+  applies exponential backoff to the next sleep (capped by `backoff_max_seconds`), and sets
+  `DIRECTION_HEALTH{direction}=0` after `circuit_open_after` crashes. One bad credential degrades
+  only its directions; the rest keep running.
+- **Telegram alerts** (`telegram/alerts.py`): `AlertNotifier` DMs the admin/alert chat on systemic
+  crashes — auth failures escalate on the first crash, generic crashes after `alert_consecutive_crashes`,
+  with a cooldown so a crash loop sends one alert (not one per cycle) plus a "recovered" message.
+  All methods swallow their own exceptions. Configured via `NAVAAR_ALERT_*` (falls back to the first
+  admin id when `alert_chat_id` is unset).
+- **Readiness**: `/healthz` is lenient (liveness only). `/readyz` returns 503 `degraded` when a
+  direction's `last_{direction}_sync` is older than `interval * readiness_stale_multiplier`, so a
+  silent crash-loop flips the pod NotReady instead of staying `1/1 Ready`.
+- **Logging**: the prod (JSON) structlog chain includes `format_exc_info`, so `logger.error(..., exc_info=True)`
+  emits a real traceback string (no frame locals — avoids leaking tokens).
 
 ### Spotify Client
 
@@ -134,6 +173,8 @@ All Prometheus metrics are defined in `metrics.py` and pre-initialized with all 
 
 ## Deployment
 
-CI/CD: push to main → GitHub Actions (test + build Docker image → GHCR) → ArgoCD auto-syncs `deploy/k8s/` to k3s cluster. Secrets are managed manually in-cluster (ArgoCD ignores Secret data diffs via `ignoreDifferences`). The deployment uses `Recreate` strategy (SQLite, single writer) and node affinity to avoid the control-plane node.
+CI/CD: push to main → GitHub Actions (ruff lint + pytest w/ coverage gate, then build Docker image → GHCR) → ArgoCD auto-syncs `deploy/k8s/` to k3s cluster. Secrets are managed manually in-cluster (ArgoCD ignores Secret data diffs via `ignoreDifferences`). The deployment uses `Recreate` strategy (SQLite, single writer) and node affinity to avoid the control-plane node.
 
-The `.spotify_cache` file must be copied to the PVC's `/data` directory. Generate it locally with `scripts/spotify_auth.py`, then `kubectl cp` to the pod.
+The pod runs as non-root (uid 1000); an init-container chowns `/data` to 1000:1000 on start, so `kubectl cp` of files (which land as the local user's uid) no longer needs a manual chown. A `backup-cronjob.yaml` runs a daily SQLite online `.backup` into `/data/backups` (keeps the last 14) on the same node.
+
+The `.spotify_cache` file must be copied to the PVC's `/data` directory. Generate it locally with `scripts/spotify_auth.py` (run via `uv run` so the pinned spotipy is used), then `kubectl cp` to the pod. Spotify's shared public PKCE client periodically has its refresh token revoked — when that happens all SP directions alert via Telegram and `/readyz` goes degraded; re-run the auth script and re-copy the cache.

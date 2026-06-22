@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 import sys
 import time
@@ -23,16 +24,29 @@ from navaar.ytmusic.downloader import YTDownloader
 
 
 def configure_logging(level: str) -> None:
+    # Shared processors. The exception-rendering step differs by output mode:
+    # ConsoleRenderer (TTY) renders exc_info itself, but JSONRenderer does NOT —
+    # without dict_tracebacks, `logger.error(..., exc_info=True)` would serialize
+    # to a bare `"exc_info": true` with no traceback in production logs.
+    processors: list = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.TimeStamper(fmt="iso"),
+    ]
+    if sys.stderr.isatty():
+        processors.append(structlog.dev.ConsoleRenderer())
+    else:
+        # format_exc_info renders a plain traceback string into an "exception"
+        # key. Preferred over dict_tracebacks here because the latter dumps frame
+        # locals (which can contain auth tokens) into the logs.
+        processors.append(structlog.processors.format_exc_info)
+        processors.append(structlog.processors.JSONRenderer())
+
+    log_level = logging.getLevelNamesMapping().get(level.upper(), logging.INFO)
     structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer() if sys.stderr.isatty() else structlog.processors.JSONRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(structlog, level.upper(), structlog.INFO) if hasattr(structlog, level.upper()) else 20
-        ),
+        processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
@@ -149,12 +163,32 @@ async def run() -> None:
             "sp_to_yt": settings.sync_interval_sp_to_yt,
         })
 
+    # Alert notifier: push systemic sync failures to Telegram. Falls back to the
+    # first admin DM when no dedicated alert chat is configured.
+    from navaar.telegram.alerts import AlertNotifier
+
+    alert_chat_id = settings.alert_chat_id or (
+        settings.telegram_admin_user_ids[0] if settings.telegram_admin_user_ids else None
+    )
+    alert_notifier = AlertNotifier(
+        bot=tg_app.bot,
+        chat_id=alert_chat_id,
+        enabled=settings.alert_enabled,
+        consecutive_threshold=settings.alert_consecutive_crashes,
+        cooldown_seconds=settings.alert_cooldown_seconds,
+    )
+    if not alert_chat_id:
+        logger.warning("alert_notifier_disabled", reason="no_chat_id")
+
     # Sync engine
     engine = SyncEngine(
         sync_modules=sync_modules,
         intervals=intervals,
         track_repo=track_repo,
         sync_state=sync_state,
+        alert_notifier=alert_notifier,
+        backoff_max_seconds=settings.backoff_max_seconds,
+        circuit_open_after=settings.circuit_open_after,
     )
     bot_app_builder.set_sync_engine(engine)
 
@@ -165,6 +199,8 @@ async def run() -> None:
         sync_state=sync_state,
         sync_log=sync_log,
         start_time=start_time,
+        intervals=intervals,
+        stale_multiplier=settings.readiness_stale_multiplier,
     )
     api_config = uvicorn.Config(
         api_app, host="0.0.0.0", port=settings.api_port, log_level="warning"

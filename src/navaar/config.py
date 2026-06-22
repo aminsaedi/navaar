@@ -34,3 +34,18 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///navaar.db"
     api_port: int = 8080
     log_level: str = "INFO"
+
+    # Alerting: push systemic sync failures to Telegram. Falls back to the first
+    # admin user id when alert_chat_id is 0. Set 0 + no admins to disable.
+    alert_enabled: bool = True
+    alert_chat_id: int = 0
+    alert_consecutive_crashes: int = 2  # systemic threshold (auth errors alert on first)
+    alert_cooldown_seconds: int = 1800  # re-alert window for an still-open incident
+
+    # Per-direction backoff after repeated cycle crashes (caps the retry storm).
+    backoff_max_seconds: int = 1800
+    circuit_open_after: int = 5  # consecutive crashes before a direction reports unhealthy
+
+    # /readyz reports degraded if a direction hasn't completed a cycle within
+    # this multiple of its interval (catches silent crash-loops).
+    readiness_stale_multiplier: int = 5

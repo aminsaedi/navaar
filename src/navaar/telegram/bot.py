@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -18,6 +18,7 @@ from telegram.ext import (
 
 from navaar.db.repository import SyncLogRepository, SyncStateRepository, TrackRepository
 from navaar.metrics import RETRIES_TOTAL, TRACKS_DISCOVERED
+from navaar.sync.fanout import FanOut
 
 if TYPE_CHECKING:
     from navaar.spotify.client import SpotifyClient
@@ -67,9 +68,9 @@ def _track_line(t, verbose: bool = False) -> str:
 def _ago(dt: datetime | None) -> str:
     if not dt:
         return "never"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     delta = now - dt
     secs = int(delta.total_seconds())
     if secs < 60:
@@ -104,6 +105,7 @@ class NavaarBot:
         self._yt = yt_client
         self._sp = sp_client
         self._sp_enabled = sp_client is not None
+        self._fanout = FanOut(track_repo, sp_enabled=self._sp_enabled)
         self._app: Application | None = None
         self._start_time = time.time()
 
@@ -182,22 +184,13 @@ class NavaarBot:
         )
         logger.info("tg_track_created", track_id=track.id, title=title)
 
-        # Fan-out: also create tg_to_sp track if Spotify is enabled
-        if self._sp_enabled:
-            existing_sp = await self._tracks.get_track_by_tg_file_id_and_direction(
-                audio.file_id, "tg_to_sp"
-            )
-            if not existing_sp:
-                sp_track = await self._tracks.create_track(
-                    direction="tg_to_sp",
-                    status="pending",
-                    title=title,
-                    artist=audio.performer,
-                    tg_file_id=audio.file_id,
-                    duration_seconds=audio.duration,
-                )
-                TRACKS_DISCOVERED.labels(direction="tg_to_sp").inc()
-                logger.info("tg_to_sp_track_created", track_id=sp_track.id, title=title)
+        # Fan-out to the other targets (Spotify), with consistent dedup.
+        await self._fanout.from_telegram(
+            tg_file_id=audio.file_id,
+            title=title,
+            artist=audio.performer,
+            duration=audio.duration,
+        )
 
     # ── /start, /help ────────────────────────────────────────────────
 
@@ -324,7 +317,7 @@ class NavaarBot:
             dupes = dc.get("duplicate", 0)
 
             last_ts = await self._state.get(f"last_{direction}_sync") if self._state else None
-            last_str = _ago(datetime.fromtimestamp(float(last_ts), tz=timezone.utc)) if last_ts else "never"
+            last_str = _ago(datetime.fromtimestamp(float(last_ts), tz=UTC)) if last_ts else "never"
 
             lines.append(f"<b>{label}</b>  (last sync: {last_str})")
             parts = []

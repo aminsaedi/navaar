@@ -38,6 +38,16 @@ SYNC_ERRORS = Counter(
     "Total sync errors",
     ["direction", "error_type"],
 )
+AUTH_ERRORS = Counter(
+    "navaar_auth_errors_total",
+    "Permanent authentication failures (revoked/expired credentials) by service",
+    ["service"],
+)
+SYNC_CYCLE_CRASHES = Counter(
+    "navaar_sync_cycle_crashes_total",
+    "Sync cycles that crashed with an unhandled exception, by direction",
+    ["direction"],
+)
 RETRIES_TOTAL = Counter(
     "navaar_retries_total",
     "Total retry attempts",
@@ -115,6 +125,11 @@ LAST_SYNC_PROCESSED = Gauge(
     "Number of tracks processed in last sync cycle",
     ["direction"],
 )
+DIRECTION_HEALTH = Gauge(
+    "navaar_direction_healthy",
+    "1 if the direction's last cycle succeeded, 0 if its circuit is open (repeated crashes)",
+    ["direction"],
+)
 UP = Gauge(
     "navaar_up",
     "Whether the service is up",
@@ -181,13 +196,21 @@ def init_metrics(
         LAST_SYNC_TIMESTAMP.labels(direction=direction).set(0)
         LAST_SYNC_DURATION.labels(direction=direction).set(0)
         LAST_SYNC_PROCESSED.labels(direction=direction).set(0)
+        DIRECTION_HEALTH.labels(direction=direction).set(1)
         SYNC_CYCLE_DURATION.labels(direction=direction)
         TRACK_SYNC_DURATION.labels(direction=direction)
 
     for error_type in ("no_yt_match", "no_sp_match", "unexpected", "cycle_crash",
-                        "sync_failed", "retry_failed", "download_failed", "upload_failed"):
+                        "auth_error", "sync_failed", "retry_failed",
+                        "download_failed", "upload_failed"):
         for direction in ALL_DIRECTIONS:
             SYNC_ERRORS.labels(direction=direction, error_type=error_type)
+
+    for direction in ALL_DIRECTIONS:
+        SYNC_CYCLE_CRASHES.labels(direction=direction)
+
+    for service in ("yt", "sp"):
+        AUTH_ERRORS.labels(service=service)
 
     for method in ("id3", "tg_metadata", "filename", "yt_metadata", "sp_metadata"):
         IDENTIFICATION_TOTAL.labels(method=method)

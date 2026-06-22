@@ -7,6 +7,9 @@ import httpx
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from navaar.auth_errors import retry_if_transient
+from navaar.metrics import AUTH_ERRORS
+
 logger = structlog.get_logger()
 
 YT_API_BASE = "https://www.googleapis.com/youtube/v3"
@@ -51,7 +54,20 @@ class YTMusicClient:
                 "grant_type": "refresh_token",
             },
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # A revoked/expired Google refresh token never recovers without
+            # operator re-auth — surface it distinctly rather than as a generic crash.
+            if e.response.status_code in (400, 401, 403):
+                AUTH_ERRORS.labels(service="yt").inc()
+                logger.error(
+                    "oauth_refresh_failed",
+                    service="yt",
+                    status=e.response.status_code,
+                    body=resp.text[:200],
+                )
+            raise
         data = resp.json()
         self._token["access_token"] = data["access_token"]
         self._token["expires_at"] = int(time.time()) + data["expires_in"]
@@ -66,7 +82,7 @@ class YTMusicClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.get_access_token()}"}
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
     def search_song(self, query: str, limit: int = 5) -> list[dict]:
         resp = httpx.get(
             f"{YT_API_BASE}/search",
@@ -92,7 +108,7 @@ class YTMusicClient:
         logger.debug("yt_search", query=query, result_count=len(results))
         return results
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
     def get_playlist_tracks(self) -> list[dict]:
         tracks: list[dict] = []
         page_token = None
@@ -130,7 +146,7 @@ class YTMusicClient:
         logger.debug("yt_playlist_fetched", track_count=len(tracks))
         return tracks
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
     def add_to_playlist(self, video_id: str) -> dict:
         resp = httpx.post(
             f"{YT_API_BASE}/playlistItems",
