@@ -19,4 +19,4 @@ resources:
 # for a fresh clone; the next CI run overwrites it with the 7-char commit SHA.
 images:
   - name: ghcr.io/aminsaedi/navaar
-    newTag: 95a3f48
+    newTag: 6d58e95
