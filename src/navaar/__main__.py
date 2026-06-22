@@ -225,6 +225,8 @@ async def run() -> None:
     await tg_app.initialize()
     await tg_app.start()
     await tg_app.updater.start_polling(drop_pending_updates=True)
+    # Populate the Telegram `/` command menu (setMyCommands) for admins.
+    await bot_app_builder.set_command_menu()
 
     tasks = [
         asyncio.create_task(engine.run(), name="sync_engine"),

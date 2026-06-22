@@ -6,7 +6,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -796,6 +802,55 @@ class NavaarBot:
                 await query.message.reply_text(
                     f"\u274c Track #{track_id} not found.", parse_mode="HTML"
                 )
+
+    # ── Slash-command menu ───────────────────────────────────────────
+
+    def _menu_commands(self) -> list[BotCommand]:
+        """The slash-command list shown in Telegram's `/` menu. Mirrors the
+        handlers registered in ``build_app`` (aliases omitted); ``search_sp``
+        only appears when Spotify is enabled."""
+        commands = [
+            BotCommand("status", "Live sync status dashboard"),
+            BotCommand("stats", "Aggregate statistics"),
+            BotCommand("queue", "Pending tracks waiting to sync"),
+            BotCommand("recent", "Last N synced tracks: /recent [n]"),
+            BotCommand("track", "Full details for a track: /track <id>"),
+            BotCommand("logs", "Recent sync log entries: /logs [n]"),
+            BotCommand("sync", "Force sync: /sync [tg|yt|sp|all]"),
+            BotCommand("retry", "Retry failed: /retry <id|all|tg|yt|sp>"),
+            BotCommand("delete", "Remove a track from the DB: /delete <id>"),
+            BotCommand("failed", "List failed tracks: /failed [tg|yt|sp]"),
+            BotCommand("search", "Search YouTube Music: /search <query>"),
+        ]
+        if self._sp_enabled:
+            commands.append(BotCommand("search_sp", "Search Spotify: /search_sp <query>"))
+        commands.extend([
+            BotCommand("config", "Show current configuration"),
+            BotCommand("ping", "Check bot responsiveness"),
+            BotCommand("help", "Show all commands"),
+        ])
+        return commands
+
+    async def set_command_menu(self) -> None:
+        """Register the `/` autocomplete menu via Telegram's setMyCommands.
+
+        Scoped per-admin chat so the commands surface only for admins (every
+        handler is admin-gated anyway). Best-effort: an admin who never opened a
+        chat with the bot is skipped, and any API error is logged but never
+        blocks startup."""
+        if self._app is None:
+            return
+        commands = self._menu_commands()
+        registered = 0
+        for admin_id in self._admin_ids:
+            try:
+                await self._app.bot.set_my_commands(
+                    commands, scope=BotCommandScopeChat(chat_id=admin_id)
+                )
+                registered += 1
+            except Exception:
+                logger.warning("set_my_commands_failed", admin_id=admin_id, exc_info=True)
+        logger.info("command_menu_registered", commands=len(commands), admins=registered)
 
     # ── Build application ────────────────────────────────────────────
 
