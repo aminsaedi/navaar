@@ -57,7 +57,7 @@ ignore = ["E501"]  # line length handled by formatter, not enforced hard
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.0.3",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0",
     "ruff>=0.8.0",
