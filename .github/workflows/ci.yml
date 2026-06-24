@@ -81,7 +81,11 @@ jobs:
       - name: Pin image to commit SHA
         run: |
           short_sha="${GITHUB_SHA::7}"
-          sed -i -E "s/^(\s*newTag:).*/\1 ${short_sha}/" deploy/k8s/kustomization.yaml
+          # Quote the tag: an all-digit short SHA (e.g. 2260140) is otherwise
+          # parsed as a YAML number, and kustomize rejects a non-string newTag
+          # ("cannot unmarshal number ... into ... newTag of type string"),
+          # breaking manifest generation for ArgoCD.
+          sed -i -E "s/^(\s*newTag:).*/\1 \"${short_sha}\"/" deploy/k8s/kustomization.yaml
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet -- deploy/k8s/kustomization.yaml; then

@@ -17,6 +17,8 @@ resources:
 # and the image it references always land together — no window where a manifest
 # change applies against a stale `:latest`. `newTag: latest` is only the seed value
 # for a fresh clone; the next CI run overwrites it with the 7-char commit SHA.
+# The value is always quoted — an all-digit short SHA would otherwise be parsed as
+# a YAML number, which kustomize rejects for the string-typed newTag field.
 images:
   - name: ghcr.io/aminsaedi/navaar
-    newTag: 2260140
+    newTag: "2260140"
