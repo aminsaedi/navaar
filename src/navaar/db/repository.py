@@ -89,6 +89,35 @@ class TrackRepository:
             )
             return result.scalar_one_or_none()
 
+    async def get_sibling_tracks(self, track: Track) -> list[Track]:
+        """Return every row belonging to the same *logical* track as ``track``.
+
+        All rows for one logical track share the origin's external id (the rows
+        all carry the same source prefix, e.g. tg→yt + tg→sp both keyed by
+        ``tg_file_id``). The correlating field is chosen from the direction's
+        source prefix. Returns ``[track]`` when that id isn't populated yet."""
+        prefix = track.direction.split("_to_")[0]
+        field = {"tg": "tg_file_id", "yt": "yt_video_id", "sp": "sp_track_id"}.get(prefix)
+        value = getattr(track, field) if field else None
+        if not value:
+            return [track]
+        async with self._sf() as session:
+            result = await session.execute(
+                select(Track).where(getattr(Track, field) == value).order_by(Track.id)
+            )
+            return list(result.scalars().all())
+
+    async def set_card_message_id(self, ids: list[int], message_id: int) -> None:
+        """Stamp the status-card message id onto every given row (the siblings of
+        one logical track), so any direction can later find and edit the card."""
+        if not ids:
+            return
+        async with self._sf() as session:
+            await session.execute(
+                update(Track).where(Track.id.in_(ids)).values(card_message_id=message_id)
+            )
+            await session.commit()
+
     async def get_pending_tracks(self, direction: str) -> list[Track]:
         async with self._sf() as session:
             result = await session.execute(

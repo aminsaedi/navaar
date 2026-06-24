@@ -26,6 +26,10 @@ class Track(Base):
     sp_track_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
     yt_set_video_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Telegram message id of this logical track's status card (a reply to the
+    # track's audio message). Stamped onto every sibling row so any direction can
+    # find and edit the same card. NULL until the card is first posted.
+    card_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     max_retries: Mapped[int] = mapped_column(Integer, default=3)

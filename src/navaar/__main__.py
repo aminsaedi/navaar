@@ -18,6 +18,7 @@ from navaar.sync.engine import SyncEngine
 from navaar.sync.tg_to_yt import TgToYtSync
 from navaar.sync.yt_to_tg import YtToTgSync
 from navaar.telegram.bot import NavaarBot
+from navaar.telegram.cards import TrackCardService
 from navaar.telegram.client import TelegramClient
 from navaar.ytmusic.client import YTMusicClient
 from navaar.ytmusic.downloader import YTDownloader
@@ -165,6 +166,21 @@ async def run() -> None:
             "yt_to_sp": settings.sync_interval_yt_to_sp,
             "sp_to_yt": settings.sync_interval_sp_to_yt,
         })
+
+    # Track status cards: reply to each track in the channel and live-edit the
+    # reply as the logical track syncs across platforms. Injected into the bot
+    # (initial post on channel message) and every sync module (refresh on each
+    # terminal state) so all six directions update the same card.
+    card_service = TrackCardService(
+        tg_app.bot,
+        settings.telegram_channel_id,
+        track_repo,
+        sp_enabled=sp_enabled,
+        enabled=settings.track_cards_enabled,
+    )
+    bot_app_builder.set_card_service(card_service)
+    for module in sync_modules.values():
+        module.set_card_service(card_service)
 
     # Alert notifier: push systemic sync failures to Telegram. Falls back to the
     # first admin DM when no dedicated alert chat is configured.

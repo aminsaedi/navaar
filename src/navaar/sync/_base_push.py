@@ -44,6 +44,14 @@ class BasePushSync:
         self._log = sync_log
         self._target = target_client
         self._tg = tg_client
+        self._card = None
+
+    def set_card_service(self, card_service: object) -> None:
+        self._card = card_service
+
+    async def _emit_card(self, track_id: int) -> None:
+        if self._card is not None:
+            await self._card.refresh(track_id)
 
     async def process_pending(self) -> int:
         pending = await self._tracks.get_pending_tracks(self.direction)
@@ -70,6 +78,9 @@ class BasePushSync:
                     details={"reason": "unexpected_error"},
                 )
                 SYNC_ERRORS.labels(direction=self.direction, error_type="unexpected").inc()
+            finally:
+                # Refresh the logical track's status card regardless of outcome.
+                await self._emit_card(track.id)
 
         return processed
 

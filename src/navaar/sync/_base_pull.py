@@ -46,9 +46,17 @@ class BasePullSync:
         self._log = sync_log
         self._tg = tg_client
         self._dl = downloader
+        self._card = None
 
     # Subclasses set this to the client whose get_playlist_tracks() is diffed.
     _playlist_client: object
+
+    def set_card_service(self, card_service: object) -> None:
+        self._card = card_service
+
+    async def _emit_card(self, track_id: int) -> None:
+        if self._card is not None:
+            await self._card.refresh(track_id)
 
     async def process_new_tracks(self) -> int:
         synced = 0
@@ -103,55 +111,59 @@ class BasePullSync:
     ) -> int:
         """Download a YouTube video via yt-dlp, upload it to Telegram, mark the
         track synced, and return the Telegram message id. Marks the track failed
-        and re-raises on download or upload failure."""
-        local_path = None
+        and re-raises on download or upload failure. Refreshes the track's status
+        card on every terminal outcome (the upload creates the card's anchor)."""
         try:
-            local_path = await self._dl.download(video_id)
-            YT_DOWNLOAD_TOTAL.labels(result="success").inc()
-        except Exception as e:
-            YT_DOWNLOAD_TOTAL.labels(result="failure").inc()
-            await self._tracks.mark_failed(track_id, f"download_failed: {e}")
-            await self._log.log(
-                "download_failed",
-                track_id=track_id,
-                direction=self.direction,
-                details={"video_id": video_id, "error": str(e)},
-            )
-            raise
+            local_path = None
+            try:
+                local_path = await self._dl.download(video_id)
+                YT_DOWNLOAD_TOTAL.labels(result="success").inc()
+            except Exception as e:
+                YT_DOWNLOAD_TOTAL.labels(result="failure").inc()
+                await self._tracks.mark_failed(track_id, f"download_failed: {e}")
+                await self._log.log(
+                    "download_failed",
+                    track_id=track_id,
+                    direction=self.direction,
+                    details={"video_id": video_id, "error": str(e)},
+                )
+                raise
 
-        try:
-            caption = f"Synced by Navaar | #{track_id}"
-            message_id = await self._tg.send_audio(
-                file_path=local_path,
-                title=title,
-                performer=artist,
-                duration=duration,
-                caption=caption,
-            )
-            TG_UPLOAD_TOTAL.labels(result="success").inc()
-            await self._tracks.mark_synced(track_id, tg_message_id=message_id)
-            await self._log.log(
-                "track_synced",
-                track_id=track_id,
-                direction=self.direction,
-                details={"video_id": video_id, "message_id": message_id, "title": title},
-            )
-            TRACKS_SYNCED.labels(direction=self.direction).inc()
-            TRACK_SYNC_DURATION.labels(direction=self.direction).observe(time.monotonic() - start)
-            logger.info(f"{self.direction}_synced", track_id=track_id, message_id=message_id)
-            return message_id
-        except Exception as e:
-            TG_UPLOAD_TOTAL.labels(result="failure").inc()
-            await self._tracks.mark_failed(track_id, f"upload_failed: {e}")
-            await self._log.log(
-                "upload_failed",
-                track_id=track_id,
-                direction=self.direction,
-                details={"video_id": video_id, "error": str(e)},
-            )
-            raise
+            try:
+                caption = f"Synced by Navaar | #{track_id}"
+                message_id = await self._tg.send_audio(
+                    file_path=local_path,
+                    title=title,
+                    performer=artist,
+                    duration=duration,
+                    caption=caption,
+                )
+                TG_UPLOAD_TOTAL.labels(result="success").inc()
+                await self._tracks.mark_synced(track_id, tg_message_id=message_id)
+                await self._log.log(
+                    "track_synced",
+                    track_id=track_id,
+                    direction=self.direction,
+                    details={"video_id": video_id, "message_id": message_id, "title": title},
+                )
+                TRACKS_SYNCED.labels(direction=self.direction).inc()
+                TRACK_SYNC_DURATION.labels(direction=self.direction).observe(time.monotonic() - start)
+                logger.info(f"{self.direction}_synced", track_id=track_id, message_id=message_id)
+                return message_id
+            except Exception as e:
+                TG_UPLOAD_TOTAL.labels(result="failure").inc()
+                await self._tracks.mark_failed(track_id, f"upload_failed: {e}")
+                await self._log.log(
+                    "upload_failed",
+                    track_id=track_id,
+                    direction=self.direction,
+                    details={"video_id": video_id, "error": str(e)},
+                )
+                raise
+            finally:
+                self._dl.cleanup(local_path)
         finally:
-            self._dl.cleanup(local_path)
+            await self._emit_card(track_id)
 
     async def _retry_track(self, track) -> None:  # pragma: no cover - overridden
         raise NotImplementedError

@@ -110,6 +110,26 @@ track (already deduped) itself:
 Cross-service dedup prevents loops: `has_track_for_direction` checks whether a track already
 exists for the target direction keyed by the same external id before creating a fan-out row.
 
+### Status Cards
+
+`TrackCardService` (`telegram/cards.py`) replies, in the channel, to each track's audio
+message with a live "status card": where it was first seen (TG/YT/SP), per-platform sync
+status, and inline URL buttons to the YT Music / Spotify entries once they exist.
+
+- A *logical track* is the set of `Track` rows sharing the origin's external id
+  (`TrackRepository.get_sibling_tracks` keys off the direction's source prefix). One card
+  per logical track; its `tg_message_id` (the card reply) is stamped onto every sibling row
+  via `set_card_message_id`, so any direction can find and edit the same card.
+- The card is posted once (the bot on a channel post, or `_download_and_upload` once the
+  TG upload creates the anchor message) and **edited in place** thereafter. Both sync base
+  classes call `_emit_card(track_id)` after every terminal state, so all six directions
+  refresh the same card. A per-logical-track `asyncio.Lock` prevents two concurrent loops
+  double-posting the first card.
+- Best-effort: `refresh()` swallows all its own exceptions and an "is not modified" edit is
+  a no-op — a card failure can never break a sync.
+- `/card [id]` (admin) posts/refreshes a card on demand (defaults to the most recent track)
+  — used to backfill. Gated by `NAVAAR_TRACK_CARDS_ENABLED` (default on).
+
 ### Resilience & Alerting
 
 - **Auth errors** (`auth_errors.py`): permanent failures (401/403/`invalid_grant`/revoked) are

@@ -24,6 +24,10 @@ async def _run_migrations(engine: AsyncEngine) -> None:
             await conn.execute(
                 text("ALTER TABLE tracks ADD COLUMN sp_track_id VARCHAR(30)")
             )
+        if "card_message_id" not in columns:
+            await conn.execute(
+                text("ALTER TABLE tracks ADD COLUMN card_message_id INTEGER")
+            )
 
 
 async def init_db(database_url: str) -> None:

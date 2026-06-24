@@ -112,11 +112,15 @@ class NavaarBot:
         self._sp = sp_client
         self._sp_enabled = sp_client is not None
         self._fanout = FanOut(track_repo, sp_enabled=self._sp_enabled)
+        self._card = None
         self._app: Application | None = None
         self._start_time = time.time()
 
     def set_sync_engine(self, engine: SyncEngine) -> None:
         self._engine = engine
+
+    def set_card_service(self, card_service: object) -> None:
+        self._card = card_service
 
     def _is_admin(self, update: Update) -> bool:
         user = update.effective_user
@@ -198,6 +202,11 @@ class NavaarBot:
             duration=audio.duration,
         )
 
+        # Reply with the initial status card (targets pending). It then edits
+        # itself in place as each direction finishes syncing.
+        if self._card is not None:
+            await self._card.refresh(track.id)
+
     # ── /start, /help ────────────────────────────────────────────────
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -224,6 +233,7 @@ class NavaarBot:
             "/queue \u2014 Pending tracks waiting to sync\n"
             "/recent [n] \u2014 Last n synced tracks (default 10)\n"
             "/track &lt;id&gt; \u2014 Full details for a track\n"
+            "/card [id] \u2014 Post/refresh a track's status card\n"
             "/logs [n] \u2014 Recent sync log entries\n"
             "\n"
             "<b>Actions</b>\n"
@@ -507,6 +517,35 @@ class NavaarBot:
         keyboard = InlineKeyboardMarkup([buttons])
 
         await self._reply(update, "\n".join(lines), reply_markup=keyboard)
+
+    # ── /card [id] ───────────────────────────────────────────────────
+
+    async def _cmd_card(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            return
+        if self._card is None:
+            await self._reply(update, "❌ Status cards are disabled.")
+            return
+
+        if context.args:
+            try:
+                track_id = int(context.args[0].lstrip("#"))
+            except ValueError:
+                await self._reply(update, "❌ Invalid track ID.")
+                return
+            t = await self._tracks.get_track(track_id)
+        else:
+            recent = await self._tracks.get_recent_tracks(limit=1)
+            t = recent[0] if recent else None
+
+        if not t:
+            await self._reply(update, "❌ No track to build a card for.")
+            return
+
+        await self._card.refresh(t.id)
+        await self._reply(
+            update, f"\U0001f4c7 Status card posted/refreshed for track <code>#{t.id}</code>."
+        )
 
     # ── /logs [n] ────────────────────────────────────────────────────
 
@@ -815,6 +854,7 @@ class NavaarBot:
             BotCommand("queue", "Pending tracks waiting to sync"),
             BotCommand("recent", "Last N synced tracks: /recent [n]"),
             BotCommand("track", "Full details for a track: /track <id>"),
+            BotCommand("card", "Post/refresh a track's status card: /card [id]"),
             BotCommand("logs", "Recent sync log entries: /logs [n]"),
             BotCommand("sync", "Force sync: /sync [tg|yt|sp|all]"),
             BotCommand("retry", "Retry failed: /retry <id|all|tg|yt|sp>"),
@@ -883,6 +923,7 @@ class NavaarBot:
             "queue": self._cmd_queue,
             "recent": self._cmd_recent,
             "track": self._cmd_track,
+            "card": self._cmd_card,
             "logs": self._cmd_logs,
             "failed": self._cmd_failed,
             "list_failed": self._cmd_failed,  # alias
