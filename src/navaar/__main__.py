@@ -89,7 +89,10 @@ async def run() -> None:
     logger.info("ytmusic_initialized", playlist_id=settings.ytmusic_playlist_id)
 
     # Downloader
-    downloader = YTDownloader(cookies_file=settings.ytdlp_cookies_file)
+    downloader = YTDownloader(
+        cookies_file=settings.ytdlp_cookies_file,
+        max_upload_mb=settings.telegram_max_upload_mb,
+    )
 
     # Spotify client (conditional)
     sp_client = None

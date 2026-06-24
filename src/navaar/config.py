@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str
     telegram_channel_id: int = -1003744100092
     telegram_admin_user_ids: list[int] = Field(default_factory=list)
+    # Max audio upload size (MiB). Files larger than this are re-encoded to a
+    # lower bitrate that fits. 50 is the standard Bot API limit; raise it only
+    # behind a self-hosted Telegram Bot API server.
+    telegram_max_upload_mb: int = 50
 
     ytmusic_auth_file: str = "oauth.json"
     ytmusic_playlist_id: str = "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"

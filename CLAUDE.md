@@ -95,7 +95,7 @@ modules (e.g. `tg_to_yt.py`) are ~20 lines: they set class attributes and wire c
 `asyncio.to_thread(...)` so a slow/backed-off external call can't stall the event loop (and the
 other five loops, the bot, and `/healthz`).
 
-**Download flows**: sp_to_tg and yt_to_tg both download audio via yt-dlp (YouTube). Spotify has no audio download API, so sp_to_tg searches YouTube for the same track and downloads from there.
+**Download flows**: sp_to_tg and yt_to_tg both download audio via yt-dlp (YouTube). Spotify has no audio download API, so sp_to_tg searches YouTube for the same track and downloads from there. yt-dlp is invoked as `python -m yt_dlp` (via `sys.executable`) so it resolves regardless of PATH. `YTDownloader` re-encodes any file larger than `NAVAAR_TELEGRAM_MAX_UPLOAD_MB` (default 50, the Bot API limit) to a lower mp3 bitrate that fits, computed from the track duration via ffprobe — so long tracks still sync.
 
 ### Fan-Out Strategy
 
