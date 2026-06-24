@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import tempfile
 from pathlib import Path
 
@@ -24,8 +25,13 @@ class YTDownloader:
     async def download(self, video_id: str) -> str:
         url = f"https://music.youtube.com/watch?v={video_id}"
         output_template = str(Path(self._download_dir) / f"{video_id}.%(ext)s")
+        # Invoke yt-dlp through the running interpreter (`python -m yt_dlp`) rather
+        # than the bare `yt-dlp` console script: the latter only resolves when the
+        # venv's bin dir is on PATH, which it isn't when the app is launched via the
+        # venv python directly (as in the container) instead of `uv run`. Using
+        # sys.executable makes downloads work regardless of how the app is started.
         cmd = [
-            "yt-dlp",
+            sys.executable, "-m", "yt_dlp",
             "--extract-audio",
             "--audio-format", "mp3",
             "--audio-quality", "0",
