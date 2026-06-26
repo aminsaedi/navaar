@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     nl_api_key: str = ""
     nl_model: str = "claude-haiku-4-5"
     nl_request_timeout: int = 30
+    # Agentic tool loop: the model drives tools (status/unsync/.../sql and an
+    # optional in-pod shell) over a text protocol. nl_shell_enabled gates the
+    # shell tool specifically — it runs arbitrary commands in the pod, so it is an
+    # explicit opt-in.
+    nl_shell_enabled: bool = False
+    nl_max_iterations: int = 8
+    nl_shell_timeout: int = 30
+    nl_tool_output_limit: int = 4000
 
     ytmusic_auth_file: str = "oauth.json"
     ytmusic_playlist_id: str = "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"

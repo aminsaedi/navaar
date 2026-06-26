@@ -132,26 +132,34 @@ status, and inline URL buttons to the YT Music / Spotify entries once they exist
 
 ### Conversational Control
 
-`NavaarAgent` (`telegram/agent.py`) lets you manage a track in natural language: reply to
-its audio message or status card in the channel and @-mention the bot ("unsync this from
-spotify"), or DM the bot (admin-gated; "unsync #42 from youtube").
+`NavaarAgent` (`telegram/agent.py`) lets you manage Navaar in natural language: reply to a
+track's audio message or status card in the channel and @-mention the bot ("unsync this from
+spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
 
-- The configured endpoint (`NAVAAR_NL_API_BASE_URL`, an OpenAI-compatible
-  `chat/completions`) is used **only as an intent parser** — it returns a constrained JSON
-  decision `{action, platform, track_id, reply}`. It is NOT used for tool calling: the
-  provided endpoint is a Claude Code shim that ignores an OpenAI `tools` param and runs its
-  own agent, so we pass no tools and parse JSON from the content (strip ``` fences →
-  `json.loads` → regex fallback). The bot then executes the action deterministically.
-- Actions: `status` (render the card text), `unsync` (yt/sp/all → `remove_from_playlist` +
-  set the `*_to_yt`/`*_to_sp` row to `unsynced` so the push loops won't re-add it),
-  `resync`/`retry` (`reset_for_retry` + `engine.force_sync`), `delete` (unsync all + delete
-  the card message + delete the rows), `none` (return the model's reply for Q&A).
-- Target resolution reuses the cards work: `get_logical_track_by_message_id` (matches
-  `tg_message_id` or `card_message_id`) + `get_sibling_tracks`; DM falls back to a `#id` in
-  the request or the most recent track.
-- Channel gate = posting rights (only admins post; channel posts have no `from_user`); DM
-  gate = `_is_admin`. Config: `NAVAAR_NL_AGENT_ENABLED`, `NAVAAR_NL_API_BASE_URL`,
-  `NAVAAR_NL_API_KEY`, `NAVAAR_NL_MODEL`, `NAVAAR_NL_REQUEST_TIMEOUT`.
+- It's a **bounded, in-pod tool loop**, not native tool-calling: the configured endpoint
+  (`NAVAAR_NL_API_BASE_URL`) is a Claude Code shim that ignores an OpenAI `tools` param and
+  never returns `tool_calls`, so we drive a text protocol ourselves. Each turn the model
+  emits one JSON object — `{"tool","args"}` or `{"final"}` — over a fresh stateless
+  `chat/completions` call; the bot parses the **first** JSON object (the shim tends to
+  hallucinate a result+final after its tool call), executes the tool, feeds the **real**
+  result back as `{"tool_result": …}`, and loops up to `nl_max_iterations`.
+- Tools (registry in `__init__`): `status`, `unsync` (yt/sp/all → `remove_from_playlist` +
+  mark the `*_to_yt`/`*_to_sp` row `unsynced` so the push loops won't re-add it),
+  `resync`/`retry` (`reset_for_retry` + `engine.force_sync`), `delete` (unsync all + remove
+  the card + delete rows), `find_duplicates` (group `get_channel_tracks` anchors by
+  normalized artist+title), `sql` (read-only SELECT via `TrackRepository.run_select`), and a
+  gated `shell` (runs `sh -c` in the pod as uid 1000, timeout + truncation). Track tools
+  default to the in-context track (the replied-to message) when `track_id` is omitted.
+- Every tool call is logged as `nl_tool_call {tool,args}` for audit. The `shell` tool runs
+  arbitrary commands next to the DB/tokens and is an explicit opt-in
+  (`NAVAAR_NL_SHELL_ENABLED`); it widens the prompt-injection surface (track titles flow into
+  the prompt) — keep it off unless you accept that.
+- Target resolution: `get_logical_track_by_message_id` (matches `tg_message_id` or
+  `card_message_id`) + `get_sibling_tracks`. Channel gate = posting rights (channel posts
+  have no `from_user`); DM gate = `_is_admin`. Config: `NAVAAR_NL_AGENT_ENABLED`,
+  `NAVAAR_NL_API_BASE_URL`, `NAVAAR_NL_API_KEY`, `NAVAAR_NL_MODEL`, `NAVAAR_NL_REQUEST_TIMEOUT`,
+  `NAVAAR_NL_SHELL_ENABLED`, `NAVAAR_NL_MAX_ITERATIONS`, `NAVAAR_NL_SHELL_TIMEOUT`,
+  `NAVAAR_NL_TOOL_OUTPUT_LIMIT`.
 
 ### Resilience & Alerting
 

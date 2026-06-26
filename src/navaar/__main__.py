@@ -230,9 +230,15 @@ async def run() -> None:
             yt_client=yt_client,
             sp_client=sp_client,
             sp_enabled=sp_enabled,
+            shell_enabled=settings.nl_shell_enabled,
+            max_iterations=settings.nl_max_iterations,
+            shell_timeout=settings.nl_shell_timeout,
+            tool_output_limit=settings.nl_tool_output_limit,
         )
         bot_app_builder.set_agent(agent)
-        logger.info("nl_agent_enabled", model=settings.nl_model)
+        logger.info(
+            "nl_agent_enabled", model=settings.nl_model, shell=settings.nl_shell_enabled
+        )
 
     # FastAPI app
     start_time = time.time()
