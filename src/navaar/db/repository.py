@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from navaar.db.models import SyncLog, SyncState, Track
@@ -86,6 +86,23 @@ class TrackRepository:
                 select(Track).where(
                     Track.tg_file_id == file_id, Track.direction == direction
                 )
+            )
+            return result.scalar_one_or_none()
+
+    async def get_logical_track_by_message_id(self, message_id: int) -> Track | None:
+        """Resolve a Telegram message id to a track, matching either the track's
+        audio message (``tg_message_id``) or its status-card reply
+        (``card_message_id``). Used to find the track a user replied to."""
+        async with self._sf() as session:
+            result = await session.execute(
+                select(Track)
+                .where(
+                    or_(
+                        Track.tg_message_id == message_id,
+                        Track.card_message_id == message_id,
+                    )
+                )
+                .limit(1)
             )
             return result.scalar_one_or_none()
 

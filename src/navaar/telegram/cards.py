@@ -34,6 +34,7 @@ _STATUS_ICON = {
     "synced": "✅",
     "failed": "❌",
     "duplicate": "\U0001f501",
+    "unsynced": "\U0001f6ab",
 }
 
 # Statuses for which the target's external link is meaningful (the track exists

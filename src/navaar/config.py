@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     # platform sync status, links). Set False to disable the channel replies.
     track_cards_enabled: bool = True
 
+    # Natural-language control: reply+@mention the bot in the channel (or DM it)
+    # to manage a track ("unsync this from spotify"). An OpenAI-compatible
+    # chat/completions endpoint parses the request into a constrained action; the
+    # bot executes it. Live only when nl_agent_enabled and nl_api_base_url are set.
+    nl_agent_enabled: bool = False
+    nl_api_base_url: str = ""  # e.g. http://host:3456/v1
+    nl_api_key: str = ""
+    nl_model: str = "claude-haiku-4-5"
+    nl_request_timeout: int = 30
+
     ytmusic_auth_file: str = "oauth.json"
     ytmusic_playlist_id: str = "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"
     ytmusic_client_id: str = ""

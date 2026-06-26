@@ -167,6 +167,29 @@ class YTMusicClient:
         logger.info("yt_added_to_playlist", video_id=video_id)
         return result
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
+    def remove_from_playlist(self, video_id: str, playlist_tracks: list[dict] | None = None) -> bool:
+        """Remove the playlist entry for ``video_id``. The Data API deletes by the
+        playlistItem id (``setVideoId``), so look it up from the playlist first.
+        Returns False when the track isn't in the playlist."""
+        if playlist_tracks is None:
+            playlist_tracks = self.get_playlist_tracks()
+        set_video_id = next(
+            (t.get("setVideoId") for t in playlist_tracks if t.get("videoId") == video_id),
+            None,
+        )
+        if not set_video_id:
+            logger.info("yt_remove_not_in_playlist", video_id=video_id)
+            return False
+        resp = httpx.delete(
+            f"{YT_API_BASE}/playlistItems",
+            headers=self._headers(),
+            params={"id": set_video_id},
+        )
+        resp.raise_for_status()
+        logger.info("yt_removed_from_playlist", video_id=video_id, set_video_id=set_video_id)
+        return True
+
     def is_in_playlist(self, video_id: str, playlist_tracks: list[dict] | None = None) -> bool:
         if playlist_tracks is None:
             playlist_tracks = self.get_playlist_tracks()

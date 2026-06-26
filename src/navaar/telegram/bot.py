@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -43,6 +44,7 @@ _S = {
     "failed": "\u274c",          # red X
     "duplicate": "\U0001f501",   # repeat
     "retry_scheduled": "\U0001f504", # arrows counterclockwise
+    "unsynced": "\U0001f6ab",    # no-entry (removed from playlist)
 }
 
 _DIR = {
@@ -113,6 +115,8 @@ class NavaarBot:
         self._sp_enabled = sp_client is not None
         self._fanout = FanOut(track_repo, sp_enabled=self._sp_enabled)
         self._card = None
+        self._agent = None
+        self._bot_username: str | None = None
         self._app: Application | None = None
         self._start_time = time.time()
 
@@ -121,6 +125,9 @@ class NavaarBot:
 
     def set_card_service(self, card_service: object) -> None:
         self._card = card_service
+
+    def set_agent(self, agent: object) -> None:
+        self._agent = agent
 
     def _is_admin(self, update: Update) -> bool:
         user = update.effective_user
@@ -206,6 +213,59 @@ class NavaarBot:
         # itself in place as each direction finishes syncing.
         if self._card is not None:
             await self._card.refresh(track.id)
+
+    # ── Natural-language control ─────────────────────────────────────
+
+    def _strip_mention(self, text: str) -> str:
+        if self._bot_username:
+            text = re.sub(
+                rf"@{re.escape(self._bot_username)}", "", text, flags=re.IGNORECASE
+            )
+        return text.strip()
+
+    async def _handle_channel_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """A text post in the channel that replies to a track/card and @-mentions the
+        bot → natural-language action. Posting rights to the channel are the gate."""
+        if self._agent is None or not getattr(self._agent, "enabled", False):
+            return
+        message = update.channel_post
+        if not message or not message.text or message.chat_id != self._channel_id:
+            return
+        if not message.reply_to_message:
+            return
+        if not self._bot_username or f"@{self._bot_username}".lower() not in message.text.lower():
+            return
+
+        track = await self._tracks.get_logical_track_by_message_id(
+            message.reply_to_message.message_id
+        )
+        if not track:
+            await message.reply_text(
+                "Please reply to a track's audio message or its status card.",
+                disable_web_page_preview=True,
+            )
+            return
+        siblings = await self._tracks.get_sibling_tracks(track)
+        text = self._strip_mention(message.text)
+        result = await self._agent.run(message_text=text, siblings=siblings)
+        await message.reply_text(result, disable_web_page_preview=True)
+
+    async def _handle_dm_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """An admin DM (non-command text) → natural-language action. The target track
+        comes from an id in the message or defaults to the most recent."""
+        if self._agent is None or not getattr(self._agent, "enabled", False):
+            return
+        if not self._is_admin(update):
+            return
+        message = update.message
+        if not message or not message.text:
+            return
+        result = await self._agent.run(message_text=message.text, siblings=None)
+        await message.reply_text(result, disable_web_page_preview=True)
 
     # ── /start, /help ────────────────────────────────────────────────
 
@@ -880,6 +940,11 @@ class NavaarBot:
         blocks startup."""
         if self._app is None:
             return
+        try:
+            me = await self._app.bot.get_me()
+            self._bot_username = me.username
+        except Exception:
+            logger.warning("get_me_failed", exc_info=True)
         commands = self._menu_commands()
         registered = 0
         for admin_id in self._admin_ids:
@@ -909,6 +974,13 @@ class NavaarBot:
             MessageHandler(filters.AUDIO & filters.UpdateType.CHANNEL_POST, self._handle_channel_post)
         )
 
+        # Natural-language control: text post in the channel (reply + @mention).
+        self._app.add_handler(
+            MessageHandler(
+                filters.TEXT & filters.UpdateType.CHANNEL_POST, self._handle_channel_command
+            )
+        )
+
         # Inline button callback handler
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
 
@@ -936,5 +1008,14 @@ class NavaarBot:
         }
         for name, handler in commands.items():
             self._app.add_handler(CommandHandler(name, handler))
+
+        # Natural-language control via admin DM (non-command text). Added after the
+        # command handlers so slash commands take precedence.
+        self._app.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+                self._handle_dm_message,
+            )
+        )
 
         return self._app

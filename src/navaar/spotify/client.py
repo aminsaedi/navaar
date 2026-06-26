@@ -96,6 +96,11 @@ class SpotifyClient:
         self._sp.playlist_add_items(self._playlist_id, [track_id])
         logger.info("sp_added_to_playlist", track_id=track_id)
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
+    def remove_from_playlist(self, track_id: str) -> None:
+        self._sp.playlist_remove_all_occurrences_of_items(self._playlist_id, [track_id])
+        logger.info("sp_removed_from_playlist", track_id=track_id)
+
     def is_in_playlist(
         self, track_id: str, playlist_tracks: list[dict] | None = None
     ) -> bool:

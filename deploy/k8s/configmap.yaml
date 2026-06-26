@@ -21,3 +21,8 @@ data:
   NAVAAR_SYNC_INTERVAL_SP_TO_TG: "120"
   NAVAAR_SYNC_INTERVAL_YT_TO_SP: "120"
   NAVAAR_SYNC_INTERVAL_SP_TO_YT: "120"
+  # Natural-language control (reply+@mention the bot, or DM it) via an
+  # OpenAI-compatible endpoint that parses requests into constrained actions.
+  NAVAAR_NL_AGENT_ENABLED: "true"
+  NAVAAR_NL_API_BASE_URL: "http://100.117.91.127:3456/v1"
+  NAVAAR_NL_MODEL: "claude-haiku-4-5"
