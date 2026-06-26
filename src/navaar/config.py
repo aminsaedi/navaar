@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     nl_agent_enabled: bool = False
     nl_api_base_url: str = ""  # e.g. http://host:3456/v1
     nl_api_key: str = ""
-    nl_model: str = "claude-haiku-4-5"
+    nl_model: str = "claude-sonnet-4-6"
     nl_request_timeout: int = 30
     # Agentic tool loop: the model drives tools (status/unsync/.../sql and an
     # optional in-pod shell) over a text protocol. nl_shell_enabled gates the

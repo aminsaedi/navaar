@@ -25,7 +25,7 @@ data:
   # OpenAI-compatible endpoint that parses requests into constrained actions.
   NAVAAR_NL_AGENT_ENABLED: "true"
   NAVAAR_NL_API_BASE_URL: "http://100.117.91.127:3456/v1"
-  NAVAAR_NL_MODEL: "claude-haiku-4-5"
+  NAVAAR_NL_MODEL: "claude-sonnet-4-6"
   # Agentic tool loop with an in-pod shell tool (runs arbitrary commands as uid
   # 1000 alongside the DB/tokens — explicit opt-in).
   NAVAAR_NL_SHELL_ENABLED: "true"
