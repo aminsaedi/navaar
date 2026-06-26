@@ -156,14 +156,29 @@ async def test_tool_resync_forces_sync(track_repo: TrackRepository) -> None:
     assert forced == {"tg_to_yt", "tg_to_sp"}
 
 
-async def test_tool_delete_removes_rows(track_repo: TrackRepository) -> None:
+async def test_tool_delete_removes_rows_and_messages(track_repo: TrackRepository) -> None:
     agent = _agent(track_repo, yt=MagicMock(remove_from_playlist=MagicMock(return_value=True)))
     siblings = await _mk_logical(track_repo)
     ids = [s.id for s in siblings]
     out = await agent._tool_delete({}, siblings[0].id)
     for tid in ids:
         assert await track_repo.get_track(tid) is None
+    # both the audio message (100) and the status card (200) are deleted
+    deleted = {c.kwargs["message_id"] for c in agent._bot.delete_message.call_args_list}
+    assert deleted == {100, 200}
     assert "Deleted" in out
+
+
+async def test_tool_delete_message(track_repo: TrackRepository) -> None:
+    agent = _agent(track_repo)
+    out = await agent._tool_delete_message({"message_id": 555}, None)
+    agent._bot.delete_message.assert_awaited_once_with(chat_id=-1003744100092, message_id=555)
+    assert "Deleted channel message 555" in out
+
+
+async def test_tool_delete_message_requires_id(track_repo: TrackRepository) -> None:
+    out = await _agent(track_repo)._tool_delete_message({}, None)
+    assert "numeric message_id" in out
 
 
 async def test_tool_sql_returns_rows(track_repo: TrackRepository) -> None:

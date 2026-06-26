@@ -45,10 +45,15 @@ _TOOL_DESCRIPTIONS = {
     "status": "status(track_id?): show a track's cross-platform sync status and links.",
     "unsync": "unsync(track_id?, platform): remove a track from yt/sp/all playlists.",
     "resync": "resync(track_id?, platform): re-queue a track to sync to yt/sp/all.",
-    "delete": "delete(track_id?): remove a track from all playlists and forget it.",
+    "delete": (
+        "delete(track_id?): fully remove a track — delete its channel audio message and "
+        "status card, remove it from the YT/Spotify playlists, and forget the record."
+    ),
+    "delete_message": "delete_message(message_id): delete a single message from the channel.",
     "find_duplicates": "find_duplicates(): list songs that appear more than once in the channel.",
 }
-_TOOL_ORDER = ["status", "unsync", "resync", "delete", "find_duplicates", "sql", "shell"]
+_TOOL_ORDER = ["status", "unsync", "resync", "delete", "delete_message",
+               "find_duplicates", "sql", "shell"]
 
 
 def _origin(track: Track) -> str:
@@ -108,6 +113,7 @@ class NavaarAgent:
             "resync": self._tool_resync,
             "retry": self._tool_resync,
             "delete": self._tool_delete,
+            "delete_message": self._tool_delete_message,
             "find_duplicates": self._tool_find_duplicates,
             "sql": self._tool_sql,
         }
@@ -254,6 +260,16 @@ class NavaarAgent:
             return "No such track."
         return await self._do_delete(siblings)
 
+    async def _tool_delete_message(self, args: dict, ctx_id: int | None) -> str:
+        mid = args.get("message_id")
+        if not isinstance(mid, int):
+            return "Provide a numeric message_id."
+        try:
+            await self._bot.delete_message(chat_id=self._channel_id, message_id=mid)
+        except Exception as e:
+            return f"Could not delete message {mid}: {e}"
+        return f"Deleted channel message {mid}."
+
     async def _tool_find_duplicates(self, args: dict, ctx_id: int | None) -> str:
         return await self._find_duplicates()
 
@@ -348,16 +364,20 @@ class NavaarAgent:
 
     async def _do_delete(self, siblings: list[Track]) -> str:
         await self._do_unsync(siblings, "all")
-        card_id = next((s.card_message_id for s in siblings if s.card_message_id), None)
-        if card_id:
+        # Remove the track from the channel entirely: the audio message(s) and the
+        # status card. card_message_id is shared across siblings; tg_message_id is
+        # the audio anchor (one per logical track).
+        msg_ids = {s.card_message_id for s in siblings if s.card_message_id}
+        msg_ids |= {s.tg_message_id for s in siblings if s.tg_message_id}
+        for mid in msg_ids:
             try:
-                await self._bot.delete_message(chat_id=self._channel_id, message_id=card_id)
+                await self._bot.delete_message(chat_id=self._channel_id, message_id=mid)
             except Exception:
-                logger.warning("nl_agent_card_delete_failed", exc_info=True)
+                logger.warning("nl_agent_message_delete_failed", message_id=mid, exc_info=True)
         ids = [s.id for s in siblings]
         for tid in ids:
             await self._tracks.delete_track(tid)
-        return f"🗑 Deleted track #{ids[0]} and removed it from all playlists."
+        return f"🗑 Deleted track #{ids[0]} (channel message, card, playlists, and record)."
 
     async def _refresh_card(self, siblings: list[Track]) -> None:
         if self._card is not None:

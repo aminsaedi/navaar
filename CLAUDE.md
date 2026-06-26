@@ -145,8 +145,10 @@ spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
   result back as `{"tool_result": …}`, and loops up to `nl_max_iterations`.
 - Tools (registry in `__init__`): `status`, `unsync` (yt/sp/all → `remove_from_playlist` +
   mark the `*_to_yt`/`*_to_sp` row `unsynced` so the push loops won't re-add it),
-  `resync`/`retry` (`reset_for_retry` + `engine.force_sync`), `delete` (unsync all + remove
-  the card + delete rows), `find_duplicates` (group `get_channel_tracks` anchors by
+  `resync`/`retry` (`reset_for_retry` + `engine.force_sync`), `delete` (unsync all + delete
+  the audio message + the card + the rows — a full purge), `delete_message` (delete any
+  channel message by id; the bot has `can_delete_messages`), `find_duplicates` (group
+  `get_channel_tracks` anchors by
   normalized artist+title), `sql` (read-only SELECT via `TrackRepository.run_select`), and a
   gated `shell` (runs `sh -c` in the pod as uid 1000, timeout + truncation). Track tools
   default to the in-context track (the replied-to message) when `track_id` is omitted.
