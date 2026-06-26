@@ -76,3 +76,49 @@ async def test_set_command_menu_noop_without_app() -> None:
     bot = _make_bot()
     bot._app = None
     await bot.set_command_menu()  # must not raise
+
+
+def _channel_msg(text: str, *, reply_to: int | None = None) -> MagicMock:
+    msg = MagicMock()
+    msg.text = text
+    msg.chat_id = -100
+    msg.reply_to_message = MagicMock(message_id=reply_to) if reply_to else None
+    msg.reply_text = AsyncMock()
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_channel_mention_without_reply_runs_agent() -> None:
+    # A standalone @mention (no reply) is a channel-wide request, e.g. duplicates.
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(return_value="dupes here"))
+    msg = _channel_msg("@navbot list duplicate tracks")
+    await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
+    bot._agent.run.assert_awaited_once()
+    assert bot._agent.run.await_args.kwargs["siblings"] is None
+    msg.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_channel_mention_reply_passes_track_context() -> None:
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(return_value="ok"))
+    bot._tracks = MagicMock(
+        get_logical_track_by_message_id=AsyncMock(return_value=MagicMock()),
+        get_sibling_tracks=AsyncMock(return_value=["sib"]),
+    )
+    msg = _channel_msg("@navbot unsync this", reply_to=42)
+    await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
+    assert bot._agent.run.await_args.kwargs["siblings"] == ["sib"]
+
+
+@pytest.mark.asyncio
+async def test_channel_text_without_mention_ignored() -> None:
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(enabled=True, run=AsyncMock())
+    msg = _channel_msg("just chatting, no bot here")
+    await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
+    bot._agent.run.assert_not_called()

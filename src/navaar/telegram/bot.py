@@ -226,28 +226,25 @@ class NavaarBot:
     async def _handle_channel_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """A text post in the channel that replies to a track/card and @-mentions the
-        bot → natural-language action. Posting rights to the channel are the gate."""
+        """A text post in the channel that @-mentions the bot → natural-language
+        action. If it replies to a track's audio message or status card, that track
+        is the context ("this"/"it"); otherwise it's a channel-wide request (e.g.
+        "list duplicates"). Posting rights to the channel are the gate."""
         if self._agent is None or not getattr(self._agent, "enabled", False):
             return
         message = update.channel_post
         if not message or not message.text or message.chat_id != self._channel_id:
             return
-        if not message.reply_to_message:
-            return
         if not self._bot_username or f"@{self._bot_username}".lower() not in message.text.lower():
             return
 
-        track = await self._tracks.get_logical_track_by_message_id(
-            message.reply_to_message.message_id
-        )
-        if not track:
-            await message.reply_text(
-                "Please reply to a track's audio message or its status card.",
-                disable_web_page_preview=True,
+        siblings = None
+        if message.reply_to_message:
+            track = await self._tracks.get_logical_track_by_message_id(
+                message.reply_to_message.message_id
             )
-            return
-        siblings = await self._tracks.get_sibling_tracks(track)
+            if track:
+                siblings = await self._tracks.get_sibling_tracks(track)
         text = self._strip_mention(message.text)
         result = await self._agent.run(message_text=text, siblings=siblings)
         await message.reply_text(result, disable_web_page_preview=True)
