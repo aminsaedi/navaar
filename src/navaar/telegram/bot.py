@@ -246,6 +246,10 @@ class NavaarBot:
             if track:
                 siblings = await self._tracks.get_sibling_tracks(track)
         text = self._strip_mention(message.text)
+        ctrl = self._control_command(text)
+        if ctrl is not None:
+            await message.reply_text(await ctrl(), disable_web_page_preview=True)
+            return
         result = await self._agent.run(message_text=text, siblings=siblings)
         await message.reply_text(result, disable_web_page_preview=True)
 
@@ -263,6 +267,44 @@ class NavaarBot:
             return
         result = await self._agent.run(message_text=message.text, siblings=None)
         await message.reply_text(result, disable_web_page_preview=True)
+
+    # ── Agent conversation controls (/reset, /context, /compact) ─────
+
+    def _control_command(self, text: str):
+        """Map a control command (with or without a leading slash) to the agent
+        coroutine that handles it, or None if the text isn't a control command.
+        Lets the channel @mention path reuse the same controls as the DM commands."""
+        if self._agent is None:
+            return None
+        word = text.strip().lower().lstrip("/").split()[0] if text.strip() else ""
+        return {
+            "reset": self._agent.reset,
+            "context": self._agent.context_info,
+            "usage": self._agent.context_info,
+            "compact": self._agent.compact,
+        }.get(word)
+
+    async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            return
+        await self._reply_agent_control(update, self._agent.reset if self._agent else None)
+
+    async def _cmd_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            return
+        await self._reply_agent_control(update, self._agent.context_info if self._agent else None)
+
+    async def _cmd_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            return
+        await self._reply_agent_control(update, self._agent.compact if self._agent else None)
+
+    async def _reply_agent_control(self, update: Update, fn) -> None:
+        if fn is None:
+            await update.message.reply_text("❌ The agent isn't enabled.")
+            return
+        # Plain text (not HTML): the readout can contain arbitrary session-summary text.
+        await update.message.reply_text(await fn(), disable_web_page_preview=True)
 
     # ── /start, /help ────────────────────────────────────────────────
 
@@ -303,6 +345,11 @@ class NavaarBot:
             "/retry tg \u2014 Retry all failed TG\u2192YT\n"
             "/retry yt \u2014 Retry all failed YT\u2192TG\n"
             "/delete &lt;id&gt; \u2014 Remove a track from DB\n"
+            "\n"
+            "<b>Assistant</b>\n"
+            "/context \u2014 Conversation context usage\n"
+            "/compact \u2014 Summarize + shrink the conversation\n"
+            "/reset \u2014 Wipe the conversation memory\n"
             "\n"
             "<b>Debugging</b>\n"
             "/search &lt;query&gt; \u2014 Search YouTube Music\n"
@@ -921,6 +968,12 @@ class NavaarBot:
         ]
         if self._sp_enabled:
             commands.append(BotCommand("search_sp", "Search Spotify: /search_sp <query>"))
+        if self._agent is not None:
+            commands.extend([
+                BotCommand("context", "Show the agent's conversation context usage"),
+                BotCommand("compact", "Summarize + shrink the agent's conversation"),
+                BotCommand("reset", "Wipe the agent's conversation memory"),
+            ])
         commands.extend([
             BotCommand("config", "Show current configuration"),
             BotCommand("ping", "Check bot responsiveness"),
@@ -1002,6 +1055,9 @@ class NavaarBot:
             "delete": self._cmd_delete,
             "search": self._cmd_search,
             "search_sp": self._cmd_search_sp,
+            "reset": self._cmd_reset,
+            "context": self._cmd_context,
+            "compact": self._cmd_compact,
         }
         for name, handler in commands.items():
             self._app.add_handler(CommandHandler(name, handler))

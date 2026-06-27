@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-from navaar.db.repository import TrackRepository
+from navaar.db.repository import SyncStateRepository, TrackRepository
 from navaar.spotify.client import SpotifyClient
 from navaar.telegram.agent import NavaarAgent
 from navaar.ytmusic.client import YTMusicClient
@@ -19,6 +19,7 @@ def _agent(track_repo, tmp_path, *, yt=None, sp=None, engine=None, card=None, sp
         bot=MagicMock(delete_message=AsyncMock()),
         channel_id=-1003744100092,
         track_repo=track_repo,
+        sync_state=SyncStateRepository(track_repo._sf),
         engine=engine or MagicMock(),
         card_service=card or MagicMock(refresh=AsyncMock()),
         yt_client=yt or MagicMock(),
@@ -40,10 +41,11 @@ async def _mk_logical(repo: TrackRepository, *, yt="synced", sp="synced"):
     return await repo.get_sibling_tracks(primary)
 
 
-def _result(text: str) -> ResultMessage:
+def _result(text: str, *, session_id: str = "s", usage: dict | None = None) -> ResultMessage:
     return ResultMessage(
         subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
-        num_turns=1, session_id="s", result=text,
+        num_turns=1, session_id=session_id, result=text, usage=usage or {},
+        total_cost_usd=0.01,
     )
 
 
@@ -109,6 +111,91 @@ async def test_run_includes_track_context_in_prompt(track_repo, tmp_path) -> Non
         await agent.run(message_text="unsync this", siblings=siblings)
     assert f"#{siblings[0].id}" in captured["prompt"]
     assert "Bohemian Rhapsody" in captured["prompt"]
+
+
+# ── Session memory + management ──────────────────────────────────────
+
+
+async def test_run_persists_and_resumes_session(track_repo, tmp_path) -> None:
+    agent = _agent(track_repo, tmp_path)
+    captured = []
+
+    async def gen(prompt=None, options=None):
+        captured.append(options.resume)
+        yield _result("hi", session_id="SID-1")
+
+    with patch("navaar.telegram.agent.query", gen):
+        await agent.run(message_text="hello", siblings=None)
+        await agent.run(message_text="again", siblings=None)
+    # first run starts fresh (resume=None), second resumes the stored session
+    assert captured == [None, "SID-1"]
+
+
+async def test_reset_deletes_session_and_clears(track_repo, tmp_path) -> None:
+    agent = _agent(track_repo, tmp_path)
+
+    async def gen(prompt=None, options=None):
+        yield _result("hi", session_id="SID-9")
+
+    with patch("navaar.telegram.agent.query", gen):
+        await agent.run(message_text="x", siblings=None)
+    with patch("navaar.telegram.agent.delete_session") as ds:
+        out = await agent.reset()
+    ds.assert_called_once_with("SID-9", agent._workspace)
+    assert agent._session_id is None
+    assert "reset" in out.lower()
+    # next message starts a fresh session
+    captured = []
+
+    async def gen2(prompt=None, options=None):
+        captured.append(options.resume)
+        yield _result("hi", session_id="SID-NEW")
+
+    with patch("navaar.telegram.agent.query", gen2):
+        await agent.run(message_text="y", siblings=None)
+    assert captured == [None]
+
+
+async def test_context_info(track_repo, tmp_path) -> None:
+    agent = _agent(track_repo, tmp_path)
+    assert "No active conversation" in await agent.context_info()
+
+    async def gen(prompt=None, options=None):
+        yield _result("hi", session_id="SID", usage={
+            "input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 5000,
+        })
+
+    with patch("navaar.telegram.agent.query", gen):
+        await agent.run(message_text="x", siblings=None)
+    with patch("navaar.telegram.agent.get_session_info", return_value=None):
+        out = await agent.context_info()
+    assert "Conversation context" in out
+    assert "Messages: 1" in out
+
+
+async def test_compact_summarizes_and_reseeds(track_repo, tmp_path) -> None:
+    agent = _agent(track_repo, tmp_path)
+
+    async def seed(prompt=None, options=None):
+        yield _result("hi", session_id="OLD")
+
+    with patch("navaar.telegram.agent.query", seed):
+        await agent.run(message_text="x", siblings=None)
+
+    order = []
+
+    async def gen(prompt=None, options=None):
+        order.append(options.resume)
+        sid = "OLD" if options.resume == "OLD" else "NEW"
+        yield _result("summary" if options.resume == "OLD" else "ack", session_id=sid)
+
+    with patch("navaar.telegram.agent.query", gen), \
+            patch("navaar.telegram.agent.delete_session") as ds:
+        out = await agent.compact()
+    ds.assert_called_once_with("OLD", agent._workspace)
+    assert agent._session_id == "NEW"
+    assert order == ["OLD", None]  # summarize the old, reseed a fresh one
+    assert "Compacted" in out
 
 
 # ── Core mutation logic (what the MCP tools call) ────────────────────

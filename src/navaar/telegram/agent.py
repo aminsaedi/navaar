@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,8 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
     create_sdk_mcp_server,
+    delete_session,
+    get_session_info,
     query,
     tool,
 )
@@ -21,11 +24,42 @@ if TYPE_CHECKING:
     from telegram import Bot
 
     from navaar.db.models import Track
-    from navaar.db.repository import TrackRepository
+    from navaar.db.repository import SyncStateRepository, TrackRepository
     from navaar.sync.engine import SyncEngine
     from navaar.telegram.cards import TrackCardService
 
 logger = structlog.get_logger()
+
+_COMPACT_PROMPT = (
+    "Summarize our conversation so far — the key facts, decisions, track ids, and any state "
+    "worth remembering — as a tight bulleted note. Reply with ONLY the summary, no preamble."
+)
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _ago(iso: str | None) -> str:
+    if not iso:
+        return "just now"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return "?"
+    secs = int((datetime.now(UTC) - dt).total_seconds())
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _tok(usage: dict, key: str) -> int:
+    v = usage.get(key) if isinstance(usage, dict) else None
+    return v if isinstance(v, int) else 0
 
 NAVAAR_SYSTEM = """\
 You are Navaar's assistant — an agent running INSIDE the Navaar service pod. Navaar mirrors \
@@ -90,12 +124,14 @@ class NavaarAgent:
         bot: Bot,
         channel_id: int,
         track_repo: TrackRepository,
+        sync_state: SyncStateRepository,
         engine: SyncEngine | None,
         card_service: TrackCardService | None,
         yt_client: object,
         sp_client: object | None,
         sp_enabled: bool,
         enabled: bool = True,
+        context_window: int = 200000,
     ) -> None:
         self._model = model
         self._timeout = timeout
@@ -104,12 +140,19 @@ class NavaarAgent:
         self._bot = bot
         self._channel_id = channel_id
         self._tracks = track_repo
+        self._state = sync_state
         self._engine = engine
         self._card = card_service
         self._yt = yt_client
         self._sp = sp_client
         self._sp_enabled = sp_enabled
         self.enabled = enabled
+        self._context_window = context_window
+        # One shared conversation across the channel and all DMs. The session id is
+        # persisted in SyncState (and the transcript on the /data PVC) so memory
+        # survives restarts.
+        self._session_id: str | None = None
+        self._loaded = False
         # One agent session at a time — the SDK spawns a CLI subprocess per run and
         # the bot is low-traffic; serializing avoids resource spikes and DB contention.
         self._lock = asyncio.Lock()
@@ -124,39 +167,168 @@ class NavaarAgent:
     async def run(self, *, message_text: str, siblings: list[Track] | None = None) -> str:
         if not self.enabled:
             return ""
+        await self._load()
         prompt = self._build_prompt(message_text, siblings)
         async with self._lock:
             try:
-                return await asyncio.wait_for(self._run_query(prompt), timeout=self._timeout)
+                text, meta = await asyncio.wait_for(
+                    self._run_query(prompt, resume=self._session_id), timeout=self._timeout
+                )
             except TimeoutError:
                 logger.warning("nl_agent_timeout")
                 return "Sorry, that took too long so I stopped."
             except Exception:
                 logger.warning("nl_agent_error", exc_info=True)
+                # A stale/missing resumed session must not wedge the bot — start fresh.
+                if self._session_id is not None:
+                    self._session_id = None
+                    await self._save_session(None)
                 return "Sorry, I hit an error while working on that."
+            await self._remember(meta)
+            return text
 
-    async def _run_query(self, prompt: str) -> str:
+    async def _run_query(self, prompt: str, resume: str | None = None) -> tuple[str, dict]:
         options = ClaudeAgentOptions(
             model=self._model,
             cwd=self._workspace,
             permission_mode="bypassPermissions",
             max_turns=self._max_turns,
             setting_sources=[],
+            resume=resume,
             system_prompt=NAVAAR_SYSTEM,
             mcp_servers={"navaar": self._mcp},
             env={"API_TIMEOUT_MS": str(self._timeout * 1000)},
         )
         final: str | None = None
         texts: list[str] = []
+        meta: dict = {"session_id": None, "usage": {}, "cost": 0.0, "turns": 0}
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
                 if message.result:
                     final = message.result
+                meta["session_id"] = message.session_id
+                meta["usage"] = message.usage or {}
+                meta["cost"] = message.total_cost_usd or 0.0
+                meta["turns"] = message.num_turns or 0
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         texts.append(block.text)
-        return final or "\n".join(texts).strip() or "Done."
+        return final or "\n".join(texts).strip() or "Done.", meta
+
+    # ── Session state (one shared brain, persisted) ──────────────────
+
+    async def _load(self) -> None:
+        if self._loaded:
+            return
+        self._session_id = (await self._state.get("agent_session_id")) or None
+        self._loaded = True
+
+    async def _save_session(self, session_id: str | None) -> None:
+        await self._state.set("agent_session_id", session_id or "")
+
+    async def _load_usage(self) -> dict:
+        u = await self._state.get_json("agent_usage")
+        return u if isinstance(u, dict) else {}
+
+    async def _remember(self, meta: dict) -> None:
+        sid = meta.get("session_id")
+        if sid and sid != self._session_id:
+            self._session_id = sid
+        await self._save_session(self._session_id)
+        usage = meta.get("usage") or {}
+        prev = await self._load_usage()
+        snap = {
+            "started_at": prev.get("started_at") or _now_iso(),
+            "messages": int(prev.get("messages", 0)) + 1,
+            "last_input": _tok(usage, "input_tokens"),
+            "last_output": _tok(usage, "output_tokens"),
+            "last_cache_read": _tok(usage, "cache_read_input_tokens"),
+            "last_cache_creation": _tok(usage, "cache_creation_input_tokens"),
+            "cost_total": round(float(prev.get("cost_total", 0.0)) + float(meta.get("cost") or 0.0), 4),
+            "updated_at": _now_iso(),
+        }
+        await self._state.set_json("agent_usage", snap)
+
+    # ── Management (slash commands) ───────────────────────────────────
+
+    async def reset(self) -> str:
+        await self._load()
+        async with self._lock:
+            old = self._session_id
+            if old:
+                try:
+                    await asyncio.to_thread(delete_session, old, self._workspace)
+                except Exception:
+                    logger.warning("nl_session_delete_failed", exc_info=True)
+            self._session_id = None
+            await self._save_session(None)
+            await self._state.set_json("agent_usage", {})
+        logger.info("nl_agent_reset")
+        return "🧠 Memory reset — starting a fresh conversation."
+
+    async def context_info(self) -> str:
+        await self._load()
+        if not self._session_id:
+            return "🧠 No active conversation yet — send me a message and I'll start one."
+        usage = await self._load_usage()
+        ctx = (usage.get("last_input") or 0) + (usage.get("last_cache_read") or 0)
+        pct = round(ctx / self._context_window * 100, 1) if self._context_window else 0.0
+        summary = ""
+        try:
+            info = await asyncio.to_thread(get_session_info, self._session_id, self._workspace)
+            if info is not None:
+                summary = getattr(info, "summary", "") or getattr(info, "first_prompt", "") or ""
+        except Exception:
+            logger.warning("nl_session_info_failed", exc_info=True)
+        lines = [
+            "🧠 Conversation context",
+            f"• Messages: {usage.get('messages', 0)} · started {_ago(usage.get('started_at'))}",
+            f"• Context: ~{ctx / 1000:.1f}k tokens (~{pct}% of {self._context_window // 1000}k)",
+            f"• Last turn: {(usage.get('last_input') or 0) / 1000:.1f}k in / "
+            f"{(usage.get('last_output') or 0) / 1000:.1f}k out · "
+            f"{(usage.get('last_cache_read') or 0) / 1000:.1f}k cached",
+            f"• Cost so far: ${usage.get('cost_total', 0.0):.2f}",
+            "• Autocompact: on (auto-summarizes near the limit)",
+        ]
+        if summary:
+            lines.append(f"• Topic: {summary[:160]}")
+        lines.append("Use /reset to wipe or /compact to shrink.")
+        return "\n".join(lines)
+
+    async def compact(self) -> str:
+        await self._load()
+        if not self._session_id:
+            return "🧠 Nothing to compact yet."
+        async with self._lock:
+            old = self._session_id
+            try:
+                summary, _ = await asyncio.wait_for(
+                    self._run_query(_COMPACT_PROMPT, resume=old), timeout=self._timeout
+                )
+            except Exception:
+                logger.warning("nl_compact_summary_failed", exc_info=True)
+                return "Sorry, I couldn't compact just now."
+            try:
+                await asyncio.to_thread(delete_session, old, self._workspace)
+            except Exception:
+                logger.warning("nl_session_delete_failed", exc_info=True)
+            seed = (
+                "This is a compacted continuation of an earlier conversation. Here is the "
+                f"summary of what came before:\n\n{summary}\n\nAcknowledge in one short sentence."
+            )
+            try:
+                _, meta = await asyncio.wait_for(
+                    self._run_query(seed, resume=None), timeout=self._timeout
+                )
+                self._session_id = meta.get("session_id")
+            except Exception:
+                logger.warning("nl_compact_reseed_failed", exc_info=True)
+                self._session_id = None
+            await self._save_session(self._session_id)
+            await self._state.set_json("agent_usage", {})
+        logger.info("nl_agent_compacted")
+        return "🗜 Compacted — summarized the conversation into a smaller, fresh context."
 
     def _build_prompt(self, message_text: str, siblings: list[Track] | None) -> str:
         if siblings:

@@ -151,6 +151,14 @@ spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
   OAuth clients + card refresh). The agent calls `mcp__navaar__*` or uses Bash — its choice.
   The system prompt documents the DB schema and **mandates honesty** about scope (it only sees
   tracks Navaar ingested; a bot can't read older channel history — no channel-wide claims).
+- **Conversation memory**: one shared session across the channel and all DMs. `run()` passes
+  `resume=<session_id>` so messages accumulate into a single conversation; the id is persisted
+  in `SyncState` (`agent_session_id`) and the transcript on the `/data/agent` PVC, so memory
+  survives restarts. Managed by three admin slash commands (DM, or channel via `@bot /cmd`):
+  `/context` (token/turn/cost readout + % of the window), `/compact` (summarize → delete →
+  reseed a fresh, smaller session), `/reset` (`delete_session` + clear). Claude Code's
+  autocompact is also on. A stale/missing resumed session is auto-cleared so it can't wedge
+  the bot.
 - **Security**: this is Bash-in-the-pod as uid 1000 next to the DB and the YT/SP/bot tokens,
   driven by Telegram messages (track titles are attacker-influenceable). `bypassPermissions`
   approves everything. Bounded by an enable flag, `max_turns`, an overall `wait_for(timeout)`,

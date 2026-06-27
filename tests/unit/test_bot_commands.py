@@ -122,3 +122,40 @@ async def test_channel_text_without_mention_ignored() -> None:
     msg = _channel_msg("just chatting, no bot here")
     await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
     bot._agent.run.assert_not_called()
+
+
+def _dm_update(uid: int = 111) -> MagicMock:
+    return MagicMock(message=MagicMock(reply_text=AsyncMock()), effective_user=MagicMock(id=uid))
+
+
+@pytest.mark.asyncio
+async def test_cmd_context_calls_agent() -> None:
+    bot = _make_bot(sp_client=MagicMock())
+    bot._agent = MagicMock(context_info=AsyncMock(return_value="ctx readout"))
+    upd = _dm_update(111)
+    await bot._cmd_context(upd, MagicMock())
+    bot._agent.context_info.assert_awaited_once()
+    upd.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_reset_non_admin_ignored() -> None:
+    bot = _make_bot(sp_client=MagicMock())
+    bot._agent = MagicMock(reset=AsyncMock())
+    await bot._cmd_reset(_dm_update(999), MagicMock())  # 999 not an admin
+    bot._agent.reset.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_channel_control_command_intercepted() -> None:
+    # "@bot /reset" in the channel runs the control, not the agent.
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(
+        enabled=True, run=AsyncMock(), reset=AsyncMock(return_value="reset done")
+    )
+    msg = _channel_msg("@navbot /reset")
+    await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
+    bot._agent.reset.assert_awaited_once()
+    bot._agent.run.assert_not_called()
+    msg.reply_text.assert_awaited_once()

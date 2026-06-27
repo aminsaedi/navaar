@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     nl_request_timeout: int = 300  # overall wall-clock cap per agent run (seconds)
     nl_max_turns: int = 16         # agentic tool-use round trips per run
     nl_workspace_dir: str = "/data/agent"  # cwd + HOME for the Claude Code session
+    nl_context_window: int = 200000  # model context window, for the /context readout
 
     ytmusic_auth_file: str = "oauth.json"
     ytmusic_playlist_id: str = "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"

@@ -225,11 +225,13 @@ async def run() -> None:
             bot=tg_app.bot,
             channel_id=settings.telegram_channel_id,
             track_repo=track_repo,
+            sync_state=sync_state,
             engine=engine,
             card_service=card_service,
             yt_client=yt_client,
             sp_client=sp_client,
             sp_enabled=sp_enabled,
+            context_window=settings.nl_context_window,
         )
         bot_app_builder.set_agent(agent)
         logger.info("nl_agent_enabled", model=settings.nl_model)
