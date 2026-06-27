@@ -26,10 +26,11 @@ data:
   # full Bash/file tools (runs as uid 1000 next to the DB and tokens) — accepted.
   NAVAAR_NL_AGENT_ENABLED: "true"
   NAVAAR_NL_MODEL: "claude-sonnet-4-6"
-  # Anthropic-style endpoint the Claude Agent SDK / Claude Code talks to. The
-  # endpoint ignores auth, but the CLI needs a key set to skip interactive login.
-  ANTHROPIC_BASE_URL: "http://100.117.91.127:3456"
-  ANTHROPIC_API_KEY: "navaar-dummy"
+  # Anthropic endpoint the Claude Agent SDK / Claude Code talks to. This proxy
+  # executes the server-side web_search tool (so the agent's WebSearch works).
+  # The API key (a proxy virtual key) lives in the navaar-secrets Secret, NOT here
+  # (configmap is committed to git). secretRef overrides this configmap.
+  ANTHROPIC_BASE_URL: "https://claude-proxy.aminsaedi.com"
   # Writable HOME for the Claude Code CLI's state (~/.claude); /data is the PVC,
   # owned by uid 1000 via the init container.
   HOME: "/data/agent"
