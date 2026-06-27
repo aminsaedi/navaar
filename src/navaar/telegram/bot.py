@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import html
 import re
 import time
@@ -14,6 +16,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -265,8 +268,45 @@ class NavaarBot:
         message = update.message
         if not message or not message.text:
             return
-        result = await self._agent.run(message_text=message.text, siblings=None)
+        await self._run_agent_with_feedback(message, context, message.text, siblings=None)
+
+    async def _run_agent_with_feedback(
+        self, message, context: ContextTypes.DEFAULT_TYPE, text: str, *, siblings
+    ) -> None:
+        """Run the agent for a DM with live feedback: post an immediate "…handling your
+        request" placeholder, keep a "typing…" chat action alive while it works, then
+        delete the placeholder and send the real reply. All feedback is best-effort —
+        it can never block or break the actual answer."""
+        chat_id = message.chat_id
+        typing = asyncio.create_task(self._keep_typing(context, chat_id))
+        placeholder = None
+        try:
+            with contextlib.suppress(Exception):
+                placeholder = await message.reply_text(
+                    "\U0001f916 Navaar agent is handling your request…"
+                )
+            result = await self._agent.run(message_text=text, siblings=siblings)
+        finally:
+            typing.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await typing
+            if placeholder is not None:
+                with contextlib.suppress(Exception):
+                    await placeholder.delete()
         await message.reply_text(result, disable_web_page_preview=True)
+
+    async def _keep_typing(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+        """Re-send the 'typing…' chat action every few seconds until cancelled — Telegram
+        clears the indicator after ~5s, so a long agent turn needs it refreshed."""
+        try:
+            while True:
+                with contextlib.suppress(Exception):
+                    await context.bot.send_chat_action(
+                        chat_id=chat_id, action=ChatAction.TYPING
+                    )
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            pass
 
     # ── Agent conversation controls (/reset, /context, /compact) ─────
 

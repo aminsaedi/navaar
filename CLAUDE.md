@@ -162,6 +162,18 @@ spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
   reseed a fresh, smaller session), `/reset` (`delete_session` + clear). Claude Code's
   autocompact is also on. A stale/missing resumed session is auto-cleared so it can't wedge
   the bot.
+- **DM feedback**: an admin DM (`_run_agent_with_feedback`) posts an immediate "🤖 Navaar agent
+  is handling your request…" placeholder, keeps a `ChatAction.TYPING` indicator alive (re-sent
+  every 4s via `_keep_typing`, since Telegram clears it after ~5s), then deletes the placeholder
+  and sends the real reply. All feedback is best-effort (suppressed exceptions) so it can never
+  block or break the answer.
+- **Turn limit**: the SDK *raises* when Claude Code stops at `max_turns`. `_run_query` catches
+  that one case (message contains "maximum number of turns"), returns the partial assistant text
+  it already streamed plus a "stopped at my N-turn limit — reply 'continue'" note, and keeps the
+  session (it's not a real failure — the agent usually did useful work). Other exceptions still
+  fall through to the generic error reply. Defaults raised to `max_turns=40` / `timeout=600s`
+  because monitor-and-verify tasks poll the 120s sync loops and need headroom (16/300 surfaced a
+  spurious "I hit an error" even though the track had synced).
 - **Security**: this is Bash-in-the-pod as uid 1000 next to the DB and the YT/SP/bot tokens,
   driven by Telegram messages (track titles are attacker-influenceable). `bypassPermissions`
   approves everything. Bounded by an enable flag, `max_turns`, an overall `wait_for(timeout)`,

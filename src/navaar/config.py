@@ -25,8 +25,9 @@ class Settings(BaseSettings):
     # nl_agent_enabled is set.
     nl_agent_enabled: bool = False
     nl_model: str = "claude-sonnet-4-6"
-    nl_request_timeout: int = 300  # overall wall-clock cap per agent run (seconds)
-    nl_max_turns: int = 16         # agentic tool-use round trips per run
+    nl_request_timeout: int = 600  # overall wall-clock cap per agent run (seconds)
+    nl_max_turns: int = 40         # agentic tool-use round trips per run (monitor/verify
+                                   # tasks poll the 120s sync loops, so they need headroom)
     nl_workspace_dir: str = "/data/agent"  # cwd + HOME for the Claude Code session
     nl_context_window: int = 200000  # model context window, for the /context readout
 

@@ -202,19 +202,40 @@ class NavaarAgent:
         final: str | None = None
         texts: list[str] = []
         meta: dict = {"session_id": None, "usage": {}, "cost": 0.0, "turns": 0}
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, ResultMessage):
-                if message.result:
-                    final = message.result
-                meta["session_id"] = message.session_id
-                meta["usage"] = message.usage or {}
-                meta["cost"] = message.total_cost_usd or 0.0
-                meta["turns"] = message.num_turns or 0
-            elif isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        texts.append(block.text)
-        return final or "\n".join(texts).strip() or "Done.", meta
+        truncated = False
+        try:
+            async for message in query(prompt=prompt, options=options):
+                # session_id rides on the init system message too, so capture it from
+                # any message — on a max-turns abort the ResultMessage never arrives.
+                sid = getattr(message, "session_id", None)
+                if sid:
+                    meta["session_id"] = sid
+                if isinstance(message, ResultMessage):
+                    if message.result:
+                        final = message.result
+                    meta["usage"] = message.usage or {}
+                    meta["cost"] = message.total_cost_usd or 0.0
+                    meta["turns"] = message.num_turns or 0
+                elif isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            texts.append(block.text)
+        except Exception as e:
+            # The SDK *raises* when Claude Code stops at the turn limit. That's not a
+            # real failure — the agent has usually done useful work and produced text
+            # along the way. Surface that partial progress instead of a generic error,
+            # and keep the session so the user can just say "continue".
+            if "maximum number of turns" not in str(e).lower():
+                raise
+            truncated = True
+            logger.warning("nl_agent_max_turns", max_turns=self._max_turns)
+        body = final or "\n".join(texts).strip() or "Done."
+        if truncated:
+            body += (
+                f"\n\n⚠️ I stopped at my {self._max_turns}-turn limit — the work above may be "
+                "partial. Reply “continue” and I'll pick up where I left off."
+            )
+        return body, meta
 
     def _build_prompt(self, message_text: str, siblings: list[Track] | None) -> str:
         if siblings:

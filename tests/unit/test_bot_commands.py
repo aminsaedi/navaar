@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -126,6 +127,55 @@ async def test_channel_text_without_mention_ignored() -> None:
 
 def _dm_update(uid: int = 111) -> MagicMock:
     return MagicMock(message=MagicMock(reply_text=AsyncMock()), effective_user=MagicMock(id=uid))
+
+
+@pytest.mark.asyncio
+async def test_dm_posts_placeholder_typing_and_deletes() -> None:
+    # An admin DM should: post a placeholder, keep the typing action alive, run the
+    # agent, delete the placeholder, then send the real answer.
+    bot = _make_bot(sp_client=MagicMock())
+
+    async def fake_run(**kwargs):
+        await asyncio.sleep(0.05)  # let the typing task tick at least once
+        return "the answer"
+
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(side_effect=fake_run))
+    placeholder = MagicMock(delete=AsyncMock())
+    message = MagicMock(
+        text="how many failed tracks?",
+        chat_id=111,
+        reply_text=AsyncMock(return_value=placeholder),
+    )
+    update = MagicMock(message=message, effective_user=MagicMock(id=111))
+    context = MagicMock(bot=MagicMock(send_chat_action=AsyncMock()))
+
+    await bot._handle_dm_message(update, context)
+
+    bot._agent.run.assert_awaited_once()
+    # First reply is the placeholder; it gets deleted. Last reply is the real answer.
+    assert message.reply_text.await_count == 2
+    placeholder.delete.assert_awaited_once()
+    context.bot.send_chat_action.assert_awaited()  # typing shown at least once
+    assert message.reply_text.await_args_list[-1].args[0] == "the answer"
+
+
+@pytest.mark.asyncio
+async def test_dm_still_replies_when_placeholder_fails() -> None:
+    # If posting the placeholder or the typing action errors, the real answer must
+    # still be delivered.
+    bot = _make_bot(sp_client=MagicMock())
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(return_value="done"))
+    message = MagicMock(
+        text="ping",
+        chat_id=111,
+        reply_text=AsyncMock(side_effect=[RuntimeError("flood"), MagicMock()]),
+    )
+    update = MagicMock(message=message, effective_user=MagicMock(id=111))
+    context = MagicMock(bot=MagicMock(send_chat_action=AsyncMock(side_effect=RuntimeError("x"))))
+
+    await bot._handle_dm_message(update, context)  # must not raise
+    bot._agent.run.assert_awaited_once()
+    assert message.reply_text.await_args_list[-1].args[0] == "done"
 
 
 @pytest.mark.asyncio

@@ -74,6 +74,38 @@ async def test_run_swallows_errors(track_repo, tmp_path) -> None:
     assert "error" in out.lower()
 
 
+async def test_run_max_turns_returns_partial_progress(track_repo, tmp_path) -> None:
+    # The SDK raises when Claude Code stops at the turn limit. We should surface the
+    # partial text it produced (not the generic "I hit an error") plus a note.
+    agent = _agent(track_repo, tmp_path)
+    msg = AssistantMessage(content=[TextBlock(text="I added the song to YT.")], model="m")
+
+    async def gen(prompt=None, options=None):
+        yield msg
+        raise Exception(
+            "Claude Code returned an error result: Reached maximum number of turns (40)"
+        )
+
+    with patch("navaar.telegram.agent.query", gen):
+        out = await agent.run(message_text="add a song and monitor it", siblings=None)
+    assert "I added the song to YT." in out
+    assert "turn limit" in out.lower()
+    assert "hit an error" not in out.lower()
+
+
+async def test_run_reraises_non_max_turns_errors(track_repo, tmp_path) -> None:
+    # A genuine error (not the turn limit) still falls through to the generic reply.
+    agent = _agent(track_repo, tmp_path)
+
+    async def gen(prompt=None, options=None):
+        raise Exception("connection reset by peer")
+        yield  # pragma: no cover - makes this an async generator
+
+    with patch("navaar.telegram.agent.query", gen):
+        out = await agent.run(message_text="hi", siblings=None)
+    assert "hit an error" in out.lower()
+
+
 async def test_run_disabled_is_noop(track_repo, tmp_path) -> None:
     agent = _agent(track_repo, tmp_path)
     agent.enabled = False

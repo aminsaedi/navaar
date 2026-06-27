@@ -5,7 +5,8 @@ metadata:
   namespace: navaar
 data:
   NAVAAR_TELEGRAM_CHANNEL_ID: "-1003744100092"
-  NAVAAR_TELEGRAM_ADMIN_USER_IDS: "[701578028]"
+  # Admins: 701578028 (Amin), 136844836 (@mir_h / Hossein Mirsaeidi)
+  NAVAAR_TELEGRAM_ADMIN_USER_IDS: "[701578028, 136844836]"
   NAVAAR_YTMUSIC_PLAYLIST_ID: "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"
   NAVAAR_YTMUSIC_AUTH_FILE: "/data/oauth.json"
   NAVAAR_SYNC_INTERVAL_TG_TO_YT: "60"
@@ -26,6 +27,11 @@ data:
   # full Bash/file tools (runs as uid 1000 next to the DB and tokens) — accepted.
   NAVAAR_NL_AGENT_ENABLED: "true"
   NAVAAR_NL_MODEL: "claude-sonnet-4-6"
+  # Agentic budget per request. Monitor/verify tasks (add a track, then poll the
+  # 120s sync loop until it lands) need many tool round-trips and wall-clock time;
+  # 16 turns / 300s was too tight and surfaced a spurious "I hit an error".
+  NAVAAR_NL_MAX_TURNS: "40"
+  NAVAAR_NL_REQUEST_TIMEOUT: "600"
   # Anthropic endpoint the Claude Agent SDK / Claude Code talks to. This proxy
   # executes the server-side web_search tool (so the agent's WebSearch works).
   # The API key (a proxy virtual key) lives in the navaar-secrets Secret, NOT here
