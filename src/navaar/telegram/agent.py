@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-import httpx
 import structlog
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    create_sdk_mcp_server,
+    query,
+    tool,
+)
 
 from navaar.telegram.cards import _STATUS_ICON, _SVC_ICON, _SVC_LABEL
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from telegram import Bot
 
     from navaar.db.models import Track
@@ -22,59 +27,66 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-_PROMPT_HEADER = (
-    "You are Navaar's assistant. Navaar mirrors music tracks across a Telegram channel, a "
-    "YouTube Music playlist, and a Spotify playlist.\n\n"
-    "Each turn, respond with EXACTLY ONE JSON object and NOTHING else — no prose, no markdown:\n"
-    '  to use a tool:   {"tool": "<name>", "args": { ... }}\n'
-    '  when finished:   {"final": "<message to the user>"}\n'
-    "Never invent tool results — call the tool and wait; I send the real result back as "
-    '{"tool_result": ...}. Keep the final message short and friendly.\n\n'
-    "Tools:\n"
-)
+NAVAAR_SYSTEM = """\
+You are Navaar's assistant — an agent running INSIDE the Navaar service pod. Navaar mirrors \
+music tracks across a Telegram channel, a YouTube Music playlist, and a Spotify playlist \
+(six sync directions like tg_to_yt, yt_to_tg, tg_to_sp, sp_to_tg, yt_to_sp, sp_to_yt).
 
-# Tool descriptions, emitted only for registered tools (shell is gated).
-_TOOL_DESCRIPTIONS = {
-    "shell": "shell(command): run a shell command inside the Navaar pod; returns combined output.",
-    "sql": (
-        "sql(query): run a read-only SELECT over the SQLite DB and get rows. Main table "
-        "tracks(id, direction, status, artist, title, yt_video_id, sp_track_id, "
-        "tg_message_id, card_message_id, duration_seconds, failure_reason, created_at). "
-        "direction is e.g. 'tg_to_yt'; status is pending/synced/failed/duplicate/unsynced."
-    ),
-    "status": "status(track_id?): show a track's cross-platform sync status and links.",
-    "unsync": "unsync(track_id?, platform): remove a track from yt/sp/all playlists.",
-    "resync": "resync(track_id?, platform): re-queue a track to sync to yt/sp/all.",
-    "delete": (
-        "delete(track_id?): fully remove a track — delete its channel audio message and "
-        "status card, remove it from the YT/Spotify playlists, and forget the record."
-    ),
-    "delete_message": "delete_message(message_id): delete a single message from the channel.",
-    "find_duplicates": "find_duplicates(): list songs that appear more than once in the channel.",
-}
-_TOOL_ORDER = ["status", "unsync", "resync", "delete", "delete_message",
-               "find_duplicates", "sql", "shell"]
+You have a real shell (Bash) and file tools. For investigation or analysis — finding \
+duplicates, stats, audits, ad-hoc questions — WRITE AND RUN a small Python script rather than \
+guessing. python3 is available (use its sqlite3 module; there is no sqlite3 CLI).
+
+The live SQLite database is at /data/navaar.db. Main table `tracks` columns:
+  id, direction, status, artist, title, yt_video_id, sp_track_id, tg_message_id,
+  card_message_id, duration_seconds, failure_reason, created_at, updated_at, synced_at.
+status is one of: pending, identifying, searching, syncing, synced, failed, duplicate,
+unsynced, retry_scheduled. A single song can appear as several rows (one per direction) that
+share the origin's external id — that's one logical track, not duplicates. Treat the database
+as READ-ONLY: query it freely, but do NOT modify it directly. To change anything, use the
+navaar MCP tools below (they use the live YouTube/Spotify OAuth clients and refresh the
+channel status card):
+  - mcp__navaar__status(track_id)
+  - mcp__navaar__unsync(track_id, platform=yt|sp|all)
+  - mcp__navaar__resync(track_id, platform=yt|sp|all)
+  - mcp__navaar__delete(track_id)            # removes the channel message(s), playlists, and DB row
+  - mcp__navaar__delete_message(message_id)  # delete a single channel message
+Prefer these tools for mutations over hand-rolled API calls. The Telegram bot token and channel
+id are in the environment (NAVAAR_TELEGRAM_BOT_TOKEN, NAVAAR_TELEGRAM_CHANNEL_ID) if you need
+the Bot API for something the tools don't cover.
+
+IMPORTANT — be honest about your limits. You can only see what's in this pod: the database
+(tracks Navaar has ingested since it started running) and the filesystem. A Telegram BOT cannot
+read the channel's older message history, so you do NOT have a record of every message ever
+posted. Never claim channel-wide certainty (e.g. "there are no duplicates in the channel");
+scope your answer to the tracked data and say so plainly.
+
+Keep your final reply concise and friendly — it is sent as a Telegram message.\
+"""
 
 
 def _origin(track: Track) -> str:
     return track.direction.split("_to_")[0]
 
 
+def _ok(text: str) -> dict:
+    return {"content": [{"type": "text", "text": text}]}
+
+
 class NavaarAgent:
-    """Natural-language control as a bounded, in-pod tool loop. The configured
-    OpenAI-compatible endpoint is a Claude Code shim that doesn't emit OpenAI
-    ``tool_calls``, so we drive a text protocol ourselves: the model emits one JSON
-    object per turn ({"tool",...} or {"final",...}); this class executes the tool in
-    the pod and feeds the real result back. The model decides; the pod acts.
+    """Natural-language control backed by the Claude Agent SDK: it runs Claude Code
+    (Bash + file tools) inside the pod, pointed at the Anthropic endpoint via the
+    ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY environment variables. Dynamic analysis is
+    done by the agent writing/running scripts; Navaar's mutating operations are exposed
+    as an in-process MCP server so they stay reliable (OAuth clients + card refresh).
     """
 
     def __init__(
         self,
         *,
-        base_url: str,
-        api_key: str,
         model: str,
         timeout: int,
+        max_turns: int,
+        workspace_dir: str,
         bot: Bot,
         channel_id: int,
         track_repo: TrackRepository,
@@ -84,15 +96,11 @@ class NavaarAgent:
         sp_client: object | None,
         sp_enabled: bool,
         enabled: bool = True,
-        shell_enabled: bool = False,
-        max_iterations: int = 8,
-        shell_timeout: int = 30,
-        tool_output_limit: int = 4000,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
         self._model = model
         self._timeout = timeout
+        self._max_turns = max_turns
+        self._workspace = workspace_dir
         self._bot = bot
         self._channel_id = channel_id
         self._tracks = track_repo
@@ -101,210 +109,123 @@ class NavaarAgent:
         self._yt = yt_client
         self._sp = sp_client
         self._sp_enabled = sp_enabled
-        self.enabled = enabled and bool(base_url)
-        self._shell_enabled = shell_enabled
-        self._max_iter = max_iterations
-        self._shell_timeout = shell_timeout
-        self._out_limit = tool_output_limit
+        self.enabled = enabled
+        # One agent session at a time — the SDK spawns a CLI subprocess per run and
+        # the bot is low-traffic; serializing avoids resource spikes and DB contention.
+        self._lock = asyncio.Lock()
+        try:
+            Path(self._workspace).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning("nl_workspace_mkdir_failed", path=self._workspace, exc_info=True)
+        self._mcp = self._build_mcp_server()
 
-        self._tools: dict[str, Callable[[dict, int | None], Awaitable[str]]] = {
-            "status": self._tool_status,
-            "unsync": self._tool_unsync,
-            "resync": self._tool_resync,
-            "retry": self._tool_resync,
-            "delete": self._tool_delete,
-            "delete_message": self._tool_delete_message,
-            "find_duplicates": self._tool_find_duplicates,
-            "sql": self._tool_sql,
-        }
-        if shell_enabled:
-            self._tools["shell"] = self._tool_shell
-
-    # ── Loop ─────────────────────────────────────────────────────────
+    # ── Orchestration ────────────────────────────────────────────────
 
     async def run(self, *, message_text: str, siblings: list[Track] | None = None) -> str:
         if not self.enabled:
             return ""
-        ctx_id = siblings[0].id if siblings else None
-        messages = [
-            {"role": "system", "content": self._system_prompt(siblings)},
-            {"role": "user", "content": message_text},
-        ]
-        for _ in range(self._max_iter):
+        prompt = self._build_prompt(message_text, siblings)
+        async with self._lock:
             try:
-                content = await self._chat(messages)
+                return await asyncio.wait_for(self._run_query(prompt), timeout=self._timeout)
+            except TimeoutError:
+                logger.warning("nl_agent_timeout")
+                return "Sorry, that took too long so I stopped."
             except Exception:
-                logger.warning("nl_agent_request_failed", exc_info=True)
-                return "Sorry, I couldn't reach my language model just now."
+                logger.warning("nl_agent_error", exc_info=True)
+                return "Sorry, I hit an error while working on that."
 
-            obj = self._first_json(content)
-            if obj is None:
-                messages.append({"role": "assistant", "content": content})
-                messages.append({"role": "user", "content":
-                    'Respond with exactly one JSON object: {"tool",...} or {"final",...}.'})
-                continue
-            if "final" in obj:
-                return str(obj["final"]).strip() or "Done."
+    async def _run_query(self, prompt: str) -> str:
+        options = ClaudeAgentOptions(
+            model=self._model,
+            cwd=self._workspace,
+            permission_mode="bypassPermissions",
+            max_turns=self._max_turns,
+            setting_sources=[],
+            system_prompt=NAVAAR_SYSTEM,
+            mcp_servers={"navaar": self._mcp},
+            env={"API_TIMEOUT_MS": str(self._timeout * 1000)},
+        )
+        final: str | None = None
+        texts: list[str] = []
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage):
+                if message.result:
+                    final = message.result
+            elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        texts.append(block.text)
+        return final or "\n".join(texts).strip() or "Done."
 
-            tool = obj.get("tool")
-            args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
-            if tool not in self._tools:
-                result = f"Unknown tool '{tool}'. Available: {', '.join(self._tools)}."
-            else:
-                logger.info("nl_tool_call", tool=tool, args=args)
-                try:
-                    result = await self._tools[tool](args, ctx_id)
-                except Exception as e:
-                    logger.warning("nl_tool_error", tool=tool, exc_info=True)
-                    result = f"Tool error: {e}"
-
-            messages.append({"role": "assistant", "content": json.dumps(obj)})
-            messages.append({"role": "user", "content":
-                json.dumps({"tool_result": str(result)[:self._out_limit]}, default=str)})
-
-        return "Sorry, I couldn't finish that — it took too many steps."
-
-    def _system_prompt(self, siblings: list[Track] | None) -> str:
-        names = [n for n in _TOOL_ORDER if n in self._tools]
-        tools_desc = "\n".join(f"- {_TOOL_DESCRIPTIONS[n]}" for n in names)
+    def _build_prompt(self, message_text: str, siblings: list[Track] | None) -> str:
         if siblings:
             p = siblings[0]
             ctx = (
-                f'The user is replying to track #{p.id} ("{p.artist or "Unknown"} — '
-                f'{p.title}"). "this"/"it" means that track; omit track_id to use it.'
+                f'Context: the user is replying to track #{p.id} '
+                f'("{p.artist or "Unknown"} — {p.title}"). "this"/"it" refers to that track.\n\n'
             )
         else:
-            ctx = "No specific track is in context; use sql/find_duplicates or a #id."
-        return _PROMPT_HEADER + tools_desc + "\n\n" + ctx
+            ctx = ""
+        return f"{ctx}User request: {message_text}"
 
-    async def _chat(self, messages: list[dict]) -> str:
-        payload = {"model": self._model, "max_tokens": 1024, "messages": messages}
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(
-                f"{self._base_url}/chat/completions", json=payload, headers=headers
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+    # ── In-process MCP server (reliable Navaar mutations) ────────────
 
-    @staticmethod
-    def _first_json(content: str) -> dict | None:
-        """Extract the first balanced JSON object, ignoring any trailing content
-        (the shim tends to hallucinate a result + final after its tool call)."""
-        text = content.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-            text = re.sub(r"\n?```$", "", text).strip()
-        start = text.find("{")
-        if start == -1:
-            return None
-        depth = 0
-        in_str = False
-        esc = False
-        for i in range(start, len(text)):
-            c = text[i]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-            elif c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        obj = json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        return None
-                    return obj if isinstance(obj, dict) else None
-        return None
+    def _build_mcp_server(self):
+        _TRACK = {"type": "object", "properties": {"track_id": {"type": "integer"}},
+                  "required": ["track_id"]}
+        _TRACK_PLATFORM = {
+            "type": "object",
+            "properties": {
+                "track_id": {"type": "integer"},
+                "platform": {"type": "string", "enum": ["yt", "sp", "all"]},
+            },
+            "required": ["track_id", "platform"],
+        }
 
-    # ── Tools ────────────────────────────────────────────────────────
+        @tool("status", "Show a track's cross-platform sync status and links.", _TRACK)
+        async def status(args: dict) -> dict:
+            siblings = await self._resolve(args.get("track_id"))
+            return _ok(self._status_text(siblings) if siblings else "No such track.")
 
-    async def _resolve(self, args: dict, ctx_id: int | None) -> list[Track] | None:
-        tid = args.get("track_id")
-        tid = tid if isinstance(tid, int) else ctx_id
-        if tid is None:
-            return None
-        track = await self._tracks.get_track(tid)
-        return await self._tracks.get_sibling_tracks(track) if track else None
+        @tool("unsync", "Remove a track from the yt/sp/all playlist(s).", _TRACK_PLATFORM)
+        async def unsync(args: dict) -> dict:
+            siblings = await self._resolve(args.get("track_id"))
+            if not siblings:
+                return _ok("No such track.")
+            return _ok(await self._do_unsync(siblings, args.get("platform", "all")))
 
-    async def _tool_status(self, args: dict, ctx_id: int | None) -> str:
-        siblings = await self._resolve(args, ctx_id)
-        if not siblings:
-            return "No such track (give a track_id or reply to a track)."
-        return self._context_text(siblings)
+        @tool("resync", "Re-queue a track to sync to yt/sp/all and force a sync.", _TRACK_PLATFORM)
+        async def resync(args: dict) -> dict:
+            siblings = await self._resolve(args.get("track_id"))
+            if not siblings:
+                return _ok("No such track.")
+            return _ok(await self._do_resync(siblings, args.get("platform", "all")))
 
-    async def _tool_unsync(self, args: dict, ctx_id: int | None) -> str:
-        siblings = await self._resolve(args, ctx_id)
-        if not siblings:
-            return "No such track."
-        return await self._do_unsync(siblings, self._platform(args))
+        @tool("delete", "Fully remove a track: channel message(s), card, playlists, DB row.", _TRACK)
+        async def delete(args: dict) -> dict:
+            siblings = await self._resolve(args.get("track_id"))
+            if not siblings:
+                return _ok("No such track.")
+            return _ok(await self._do_delete(siblings))
 
-    async def _tool_resync(self, args: dict, ctx_id: int | None) -> str:
-        siblings = await self._resolve(args, ctx_id)
-        if not siblings:
-            return "No such track."
-        return await self._do_resync(siblings, self._platform(args))
+        @tool("delete_message", "Delete a single message from the channel by id.",
+              {"type": "object", "properties": {"message_id": {"type": "integer"}},
+               "required": ["message_id"]})
+        async def delete_message(args: dict) -> dict:
+            return _ok(await self._delete_message(args.get("message_id")))
 
-    async def _tool_delete(self, args: dict, ctx_id: int | None) -> str:
-        siblings = await self._resolve(args, ctx_id)
-        if not siblings:
-            return "No such track."
-        return await self._do_delete(siblings)
-
-    async def _tool_delete_message(self, args: dict, ctx_id: int | None) -> str:
-        mid = args.get("message_id")
-        if not isinstance(mid, int):
-            return "Provide a numeric message_id."
-        try:
-            await self._bot.delete_message(chat_id=self._channel_id, message_id=mid)
-        except Exception as e:
-            return f"Could not delete message {mid}: {e}"
-        return f"Deleted channel message {mid}."
-
-    async def _tool_find_duplicates(self, args: dict, ctx_id: int | None) -> str:
-        return await self._find_duplicates()
-
-    async def _tool_sql(self, args: dict, ctx_id: int | None) -> str:
-        query = args.get("query") or args.get("sql") or ""
-        if not query:
-            return "No query."
-        try:
-            rows = await self._tracks.run_select(query)
-        except Exception as e:
-            return f"SQL error: {e}"
-        return json.dumps(rows, default=str)
-
-    async def _tool_shell(self, args: dict, ctx_id: int | None) -> str:
-        command = args.get("command") or args.get("cmd") or ""
-        if not command:
-            return "No command."
-        proc = await asyncio.create_subprocess_exec(
-            "sh", "-c", command,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        return create_sdk_mcp_server(
+            "navaar", tools=[status, unsync, resync, delete, delete_message]
         )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=self._shell_timeout)
-        except TimeoutError:
-            proc.kill()
-            return f"Command timed out after {self._shell_timeout}s."
-        text = out.decode(errors="replace")
-        return text or "(no output)"
 
-    @staticmethod
-    def _platform(args: dict) -> str:
-        p = args.get("platform")
-        return p if p in ("yt", "sp", "all") else "all"
+    # ── Core actions (shared by the MCP tools) ───────────────────────
 
-    # ── Core actions ─────────────────────────────────────────────────
+    async def _resolve(self, track_id: object) -> list[Track] | None:
+        if not isinstance(track_id, int):
+            return None
+        track = await self._tracks.get_track(track_id)
+        return await self._tracks.get_sibling_tracks(track) if track else None
 
     @staticmethod
     def _ext_ids(siblings: list[Track]) -> tuple[str | None, str | None]:
@@ -317,6 +238,8 @@ class NavaarAgent:
         return next((s for s in siblings if s.direction.endswith(f"_to_{svc}")), None)
 
     async def _do_unsync(self, siblings: list[Track], platform: str) -> str:
+        if platform not in ("yt", "sp", "all"):
+            platform = "all"
         yt_id, sp_id = self._ext_ids(siblings)
         results: list[str] = []
 
@@ -345,6 +268,8 @@ class NavaarAgent:
         return self._headline(siblings, "Unsynced") + "\n" + "\n".join(results)
 
     async def _do_resync(self, siblings: list[Track], platform: str) -> str:
+        if platform not in ("yt", "sp", "all"):
+            platform = "all"
         results: list[str] = []
         for svc in [s for s in ("yt", "sp") if platform in (s, "all")]:
             if svc == "sp" and not self._sp_enabled:
@@ -364,9 +289,6 @@ class NavaarAgent:
 
     async def _do_delete(self, siblings: list[Track]) -> str:
         await self._do_unsync(siblings, "all")
-        # Remove the track from the channel entirely: the audio message(s) and the
-        # status card. card_message_id is shared across siblings; tg_message_id is
-        # the audio anchor (one per logical track).
         msg_ids = {s.card_message_id for s in siblings if s.card_message_id}
         msg_ids |= {s.tg_message_id for s in siblings if s.tg_message_id}
         for mid in msg_ids:
@@ -379,42 +301,25 @@ class NavaarAgent:
             await self._tracks.delete_track(tid)
         return f"🗑 Deleted track #{ids[0]} (channel message, card, playlists, and record)."
 
+    async def _delete_message(self, message_id: object) -> str:
+        if not isinstance(message_id, int):
+            return "Provide a numeric message_id."
+        try:
+            await self._bot.delete_message(chat_id=self._channel_id, message_id=message_id)
+        except Exception as e:
+            return f"Could not delete message {message_id}: {e}"
+        return f"Deleted channel message {message_id}."
+
     async def _refresh_card(self, siblings: list[Track]) -> None:
         if self._card is not None:
             await self._card.refresh(siblings[0].id)
-
-    @staticmethod
-    def _norm(s: str | None) -> str:
-        return " ".join((s or "").strip().lower().split())
-
-    async def _find_duplicates(self, limit: int = 30) -> str:
-        tracks = await self._tracks.get_channel_tracks()
-        groups: dict[tuple[str, str], list] = {}
-        for t in tracks:
-            groups.setdefault((self._norm(t.artist), self._norm(t.title)), []).append(t)
-        dups = sorted(
-            (g for g in groups.values() if len(g) > 1),
-            key=lambda g: (-len(g), g[0].id),
-        )
-        if not dups:
-            return f"No duplicate songs found among {len(tracks)} tracks in the channel."
-        lines = [f"Found {len(dups)} duplicated song(s) among {len(tracks)} tracks:"]
-        for g in dups[:limit]:
-            first = g[0]
-            refs = ", ".join(f"#{t.id} (msg {t.tg_message_id})" for t in g)
-            lines.append(f"• {first.artist or 'Unknown'} — {first.title} ×{len(g)} — {refs}")
-        if len(dups) > limit:
-            lines.append(f"… and {len(dups) - limit} more")
-        return "\n".join(lines)
-
-    # ── Presentation ─────────────────────────────────────────────────
 
     @staticmethod
     def _headline(siblings: list[Track], verb: str) -> str:
         p = siblings[0]
         return f"{verb}: {p.artist or 'Unknown'} — {p.title} (#{p.id})"
 
-    def _context_text(self, siblings: list[Track]) -> str:
+    def _status_text(self, siblings: list[Track]) -> str:
         primary = siblings[0]
         prefix = _origin(primary)
         by_dir = {s.direction: s for s in siblings}

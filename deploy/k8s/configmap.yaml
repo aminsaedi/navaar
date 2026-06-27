@@ -21,11 +21,15 @@ data:
   NAVAAR_SYNC_INTERVAL_SP_TO_TG: "120"
   NAVAAR_SYNC_INTERVAL_YT_TO_SP: "120"
   NAVAAR_SYNC_INTERVAL_SP_TO_YT: "120"
-  # Natural-language control (reply+@mention the bot, or DM it) via an
-  # OpenAI-compatible endpoint that parses requests into constrained actions.
+  # Natural-language control (reply+@mention the bot, or DM it): the Claude Agent
+  # SDK runs Claude Code inside the pod, pointed at the Anthropic endpoint. It has
+  # full Bash/file tools (runs as uid 1000 next to the DB and tokens) — accepted.
   NAVAAR_NL_AGENT_ENABLED: "true"
-  NAVAAR_NL_API_BASE_URL: "http://100.117.91.127:3456/v1"
   NAVAAR_NL_MODEL: "claude-sonnet-4-6"
-  # Agentic tool loop with an in-pod shell tool (runs arbitrary commands as uid
-  # 1000 alongside the DB/tokens — explicit opt-in).
-  NAVAAR_NL_SHELL_ENABLED: "true"
+  # Anthropic-style endpoint the Claude Agent SDK / Claude Code talks to. The
+  # endpoint ignores auth, but the CLI needs a key set to skip interactive login.
+  ANTHROPIC_BASE_URL: "http://100.117.91.127:3456"
+  ANTHROPIC_API_KEY: "navaar-dummy"
+  # Writable HOME for the Claude Code CLI's state (~/.claude); /data is the PVC,
+  # owned by uid 1000 via the init container.
+  HOME: "/data/agent"

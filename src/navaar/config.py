@@ -19,22 +19,15 @@ class Settings(BaseSettings):
     track_cards_enabled: bool = True
 
     # Natural-language control: reply+@mention the bot in the channel (or DM it)
-    # to manage a track ("unsync this from spotify"). An OpenAI-compatible
-    # chat/completions endpoint parses the request into a constrained action; the
-    # bot executes it. Live only when nl_agent_enabled and nl_api_base_url are set.
+    # to manage Navaar in plain language. Backed by the Claude Agent SDK (in-pod
+    # Claude Code) pointed at the Anthropic endpoint via ANTHROPIC_BASE_URL /
+    # ANTHROPIC_API_KEY (read from the environment by the SDK). Live only when
+    # nl_agent_enabled is set.
     nl_agent_enabled: bool = False
-    nl_api_base_url: str = ""  # e.g. http://host:3456/v1
-    nl_api_key: str = ""
     nl_model: str = "claude-sonnet-4-6"
-    nl_request_timeout: int = 30
-    # Agentic tool loop: the model drives tools (status/unsync/.../sql and an
-    # optional in-pod shell) over a text protocol. nl_shell_enabled gates the
-    # shell tool specifically — it runs arbitrary commands in the pod, so it is an
-    # explicit opt-in.
-    nl_shell_enabled: bool = False
-    nl_max_iterations: int = 8
-    nl_shell_timeout: int = 30
-    nl_tool_output_limit: int = 4000
+    nl_request_timeout: int = 300  # overall wall-clock cap per agent run (seconds)
+    nl_max_turns: int = 16         # agentic tool-use round trips per run
+    nl_workspace_dir: str = "/data/agent"  # cwd + HOME for the Claude Code session
 
     ytmusic_auth_file: str = "oauth.json"
     ytmusic_playlist_id: str = "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"

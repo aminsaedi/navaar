@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from navaar.db.models import SyncLog, SyncState, Track
@@ -89,31 +88,6 @@ class TrackRepository:
                 )
             )
             return result.scalar_one_or_none()
-
-    async def run_select(self, sql: str, limit: int = 100) -> list[dict]:
-        """Run a read-only SELECT/WITH query and return rows as dicts (capped).
-
-        Used by the agent's ``sql`` tool. Rejects anything that isn't a single
-        SELECT/WITH statement so the tool can't mutate the database."""
-        stripped = sql.strip().rstrip(";").strip()
-        if ";" in stripped:
-            raise ValueError("Only a single statement is allowed.")
-        if not re.match(r"(?is)^(select|with)\b", stripped):
-            raise ValueError("Only SELECT/WITH queries are allowed.")
-        async with self._sf() as session:
-            result = await session.execute(text(stripped))
-            rows = result.mappings().all()
-            return [dict(r) for r in rows[:limit]]
-
-    async def get_channel_tracks(self) -> list[Track]:
-        """Anchor rows — one per logical track that has an audio message in the
-        channel (``tg_message_id`` set; cards live in ``card_message_id``). Used to
-        scan for duplicate songs across the channel."""
-        async with self._sf() as session:
-            result = await session.execute(
-                select(Track).where(Track.tg_message_id.is_not(None)).order_by(Track.id)
-            )
-            return list(result.scalars().all())
 
     async def get_logical_track_by_message_id(self, message_id: int) -> Track | None:
         """Resolve a Telegram message id to a track, matching either the track's

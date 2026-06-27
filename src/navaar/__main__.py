@@ -211,17 +211,17 @@ async def run() -> None:
     )
     bot_app_builder.set_sync_engine(engine)
 
-    # Natural-language control: an OpenAI-compatible endpoint parses requests into a
-    # constrained action that the bot executes (unsync/resync/delete/status). Live
-    # only when configured; otherwise the bot's NL handlers no-op.
-    if settings.nl_agent_enabled and settings.nl_api_base_url:
+    # Natural-language control: the Claude Agent SDK runs Claude Code inside the pod
+    # (Bash/file tools + a navaar MCP server) over the Anthropic endpoint. Live only
+    # when enabled; otherwise the bot's NL handlers no-op.
+    if settings.nl_agent_enabled:
         from navaar.telegram.agent import NavaarAgent
 
         agent = NavaarAgent(
-            base_url=settings.nl_api_base_url,
-            api_key=settings.nl_api_key,
             model=settings.nl_model,
             timeout=settings.nl_request_timeout,
+            max_turns=settings.nl_max_turns,
+            workspace_dir=settings.nl_workspace_dir,
             bot=tg_app.bot,
             channel_id=settings.telegram_channel_id,
             track_repo=track_repo,
@@ -230,15 +230,9 @@ async def run() -> None:
             yt_client=yt_client,
             sp_client=sp_client,
             sp_enabled=sp_enabled,
-            shell_enabled=settings.nl_shell_enabled,
-            max_iterations=settings.nl_max_iterations,
-            shell_timeout=settings.nl_shell_timeout,
-            tool_output_limit=settings.nl_tool_output_limit,
         )
         bot_app_builder.set_agent(agent)
-        logger.info(
-            "nl_agent_enabled", model=settings.nl_model, shell=settings.nl_shell_enabled
-        )
+        logger.info("nl_agent_enabled", model=settings.nl_model)
 
     # FastAPI app
     start_time = time.time()

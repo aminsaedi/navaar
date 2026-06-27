@@ -136,32 +136,31 @@ status, and inline URL buttons to the YT Music / Spotify entries once they exist
 track's audio message or status card in the channel and @-mention the bot ("unsync this from
 spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
 
-- It's a **bounded, in-pod tool loop**, not native tool-calling: the configured endpoint
-  (`NAVAAR_NL_API_BASE_URL`) is a Claude Code shim that ignores an OpenAI `tools` param and
-  never returns `tool_calls`, so we drive a text protocol ourselves. Each turn the model
-  emits one JSON object — `{"tool","args"}` or `{"final"}` — over a fresh stateless
-  `chat/completions` call; the bot parses the **first** JSON object (the shim tends to
-  hallucinate a result+final after its tool call), executes the tool, feeds the **real**
-  result back as `{"tool_result": …}`, and loops up to `nl_max_iterations`.
-- Tools (registry in `__init__`): `status`, `unsync` (yt/sp/all → `remove_from_playlist` +
-  mark the `*_to_yt`/`*_to_sp` row `unsynced` so the push loops won't re-add it),
-  `resync`/`retry` (`reset_for_retry` + `engine.force_sync`), `delete` (unsync all + delete
-  the audio message + the card + the rows — a full purge), `delete_message` (delete any
-  channel message by id; the bot has `can_delete_messages`), `find_duplicates` (group
-  `get_channel_tracks` anchors by
-  normalized artist+title), `sql` (read-only SELECT via `TrackRepository.run_select`), and a
-  gated `shell` (runs `sh -c` in the pod as uid 1000, timeout + truncation). Track tools
-  default to the in-context track (the replied-to message) when `track_id` is omitted.
-- Every tool call is logged as `nl_tool_call {tool,args}` for audit. The `shell` tool runs
-  arbitrary commands next to the DB/tokens and is an explicit opt-in
-  (`NAVAAR_NL_SHELL_ENABLED`); it widens the prompt-injection surface (track titles flow into
-  the prompt) — keep it off unless you accept that.
+- It's a **real agentic coder**: the **Claude Agent SDK** (`claude-agent-sdk`) runs Claude
+  Code *inside the pod*. `NavaarAgent.run()` calls `query()` with
+  `permission_mode="bypassPermissions"`, `cwd`/`HOME` = `nl_workspace_dir` (`/data/agent`),
+  `max_turns`, and `setting_sources=[]`; it reads `ResultMessage.result` for the final reply.
+  The model backend is the **Anthropic-style** endpoint (`ANTHROPIC_BASE_URL` +
+  `ANTHROPIC_API_KEY`, read from the env). The image installs the `claude` CLI
+  (`npm i -g @anthropic-ai/claude-code`; Node is already present for yt-dlp).
+- The agent has Claude Code's built-in tools — **Bash, Read, Write, Edit, Glob, Grep** — so it
+  does dynamic work (e.g. "find duplicates") by writing and running its own Python over
+  `/data/navaar.db`. There is no hardcoded analysis tool by design.
+- Reliable mutations are an **in-process MCP server** (`create_sdk_mcp_server("navaar", …)`)
+  exposing `status`, `unsync`, `resync`, `delete`, `delete_message` (reusing the YT/Spotify
+  OAuth clients + card refresh). The agent calls `mcp__navaar__*` or uses Bash — its choice.
+  The system prompt documents the DB schema and **mandates honesty** about scope (it only sees
+  tracks Navaar ingested; a bot can't read older channel history — no channel-wide claims).
+- **Security**: this is Bash-in-the-pod as uid 1000 next to the DB and the YT/SP/bot tokens,
+  driven by Telegram messages (track titles are attacker-influenceable). `bypassPermissions`
+  approves everything. Bounded by an enable flag, `max_turns`, an overall `wait_for(timeout)`,
+  a single-flight `asyncio.Lock`, and the channel-mention / admin-DM gates. Accepted tradeoff.
 - Target resolution: `get_logical_track_by_message_id` (matches `tg_message_id` or
-  `card_message_id`) + `get_sibling_tracks`. Channel gate = posting rights (channel posts
-  have no `from_user`); DM gate = `_is_admin`. Config: `NAVAAR_NL_AGENT_ENABLED`,
-  `NAVAAR_NL_API_BASE_URL`, `NAVAAR_NL_API_KEY`, `NAVAAR_NL_MODEL`, `NAVAAR_NL_REQUEST_TIMEOUT`,
-  `NAVAAR_NL_SHELL_ENABLED`, `NAVAAR_NL_MAX_ITERATIONS`, `NAVAAR_NL_SHELL_TIMEOUT`,
-  `NAVAAR_NL_TOOL_OUTPUT_LIMIT`.
+  `card_message_id`) + `get_sibling_tracks`, passed to the agent as prompt context. Channel
+  gate = posting rights (channel posts have no `from_user`); DM gate = `_is_admin`. Config:
+  `NAVAAR_NL_AGENT_ENABLED`, `NAVAAR_NL_MODEL`, `NAVAAR_NL_MAX_TURNS`,
+  `NAVAAR_NL_REQUEST_TIMEOUT`, `NAVAAR_NL_WORKSPACE_DIR`, plus `ANTHROPIC_BASE_URL` /
+  `ANTHROPIC_API_KEY` / `HOME` in the configmap.
 
 ### Resilience & Alerting
 
