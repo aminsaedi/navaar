@@ -139,18 +139,21 @@ spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
 - It's a **real agentic coder**: the **Claude Agent SDK** (`claude-agent-sdk`) runs Claude
   Code *inside the pod*. `NavaarAgent.run()` calls `query()` with
   `permission_mode="bypassPermissions"`, `cwd`/`HOME` = `nl_workspace_dir` (`/data/agent`),
-  `max_turns`, and `setting_sources=[]`; it reads `ResultMessage.result` for the final reply.
-  The model backend is the **Anthropic-style** endpoint (`ANTHROPIC_BASE_URL` +
-  `ANTHROPIC_API_KEY`, read from the env). The image installs the `claude` CLI
-  (`npm i -g @anthropic-ai/claude-code`; Node is already present for yt-dlp).
-- The agent has Claude Code's built-in tools — **Bash, Read, Write, Edit, Glob, Grep** — so it
-  does dynamic work (e.g. "find duplicates") by writing and running its own Python over
-  `/data/navaar.db`. There is no hardcoded analysis tool by design.
-- Reliable mutations are an **in-process MCP server** (`create_sdk_mcp_server("navaar", …)`)
-  exposing `status`, `unsync`, `resync`, `delete`, `delete_message` (reusing the YT/Spotify
-  OAuth clients + card refresh). The agent calls `mcp__navaar__*` or uses Bash — its choice.
-  The system prompt documents the DB schema and **mandates honesty** about scope (it only sees
-  tracks Navaar ingested; a bot can't read older channel history — no channel-wide claims).
+  `max_turns`, and `setting_sources=["project"]`; it reads `ResultMessage.result` for the final
+  reply. The model backend is the **Anthropic-style** endpoint (`ANTHROPIC_BASE_URL` +
+  `ANTHROPIC_API_KEY`, read from the env). The image installs the `claude` CLI (native binary
+  via `claude.ai/install.sh`, on PATH; Node stays only for yt-dlp).
+- **No custom tools by design.** The agent only has Claude Code's built-ins — **Bash, Read,
+  Write, Edit, Glob, Grep** — and does *everything* (analysis AND mutations) by writing and
+  running its own scripts. "List duplicates" → it writes a Python/sqlite script over
+  `/data/navaar.db`, runs it, validates, answers. "Unsync" → it scripts the YT/Spotify removal
+  (it can read `/app/src/navaar` and use the installed `ytmusicapi`/`spotipy` + the token files).
+- **`CLAUDE.md` as the operating manual**: `NavaarAgent.__init__` writes a Navaar context file
+  to `<workspace>/CLAUDE.md` on startup (DB schema, `/data/navaar.db`, token paths, source at
+  `/app/src/navaar`, playlist-id/bot-token env, what unsync/resync/delete mean, and an honesty
+  mandate — it only sees ingested tracks, a bot can't read older channel history). It loads
+  because options set `setting_sources=["project"]` (verified: with `[]` the CLAUDE.md is *not*
+  read). Edit `_NAVAAR_CLAUDE_MD` in `agent.py` to change the agent's context.
 - **Conversation memory**: one shared session across the channel and all DMs. `run()` passes
   `resume=<session_id>` so messages accumulate into a single conversation; the id is persisted
   in `SyncState` (`agent_session_id`) and the transcript on the `/data/agent` PVC, so memory

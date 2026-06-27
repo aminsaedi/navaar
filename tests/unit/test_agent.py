@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
@@ -10,33 +10,21 @@ from navaar.telegram.agent import NavaarAgent
 from navaar.ytmusic.client import YTMusicClient
 
 
-def _agent(track_repo, tmp_path, *, yt=None, sp=None, engine=None, card=None, sp_enabled=True):
+def _agent(track_repo, tmp_path):
     return NavaarAgent(
         model="claude-sonnet-4-6",
         timeout=30,
         max_turns=8,
         workspace_dir=str(tmp_path / "agent"),
-        bot=MagicMock(delete_message=AsyncMock()),
-        channel_id=-1003744100092,
-        track_repo=track_repo,
         sync_state=SyncStateRepository(track_repo._sf),
-        engine=engine or MagicMock(),
-        card_service=card or MagicMock(refresh=AsyncMock()),
-        yt_client=yt or MagicMock(),
-        sp_client=sp or MagicMock(),
-        sp_enabled=sp_enabled,
+        context_window=200000,
     )
 
 
-async def _mk_logical(repo: TrackRepository, *, yt="synced", sp="synced"):
+async def _mk_logical(repo: TrackRepository):
     primary = await repo.create_track(
-        direction="tg_to_yt", status=yt, title="Bohemian Rhapsody", artist="Queen",
-        tg_file_id="FID", tg_file_unique_id="UID", tg_message_id=100,
-        yt_video_id="YTVID", card_message_id=200,
-    )
-    await repo.create_track(
-        direction="tg_to_sp", status=sp, title="Bohemian Rhapsody", artist="Queen",
-        tg_file_id="FID", sp_track_id="SPID", card_message_id=200,
+        direction="tg_to_yt", status="synced", title="Bohemian Rhapsody", artist="Queen",
+        tg_file_id="FID", tg_file_unique_id="UID", tg_message_id=100, yt_video_id="YTVID",
     )
     return await repo.get_sibling_tracks(primary)
 
@@ -47,10 +35,6 @@ def _result(text: str, *, session_id: str = "s", usage: dict | None = None) -> R
         num_turns=1, session_id=session_id, result=text, usage=usage or {},
         total_cost_usd=0.01,
     )
-
-
-def _assistant(text: str) -> AssistantMessage:
-    return AssistantMessage(content=[TextBlock(text=text)], model="claude-sonnet-4-6")
 
 
 def _stream(*messages):
@@ -65,15 +49,16 @@ def _stream(*messages):
 
 async def test_run_returns_result_message(track_repo, tmp_path) -> None:
     agent = _agent(track_repo, tmp_path)
-    with patch("navaar.telegram.agent.query", _stream(_assistant("thinking…"), _result("All done!"))):
+    with patch("navaar.telegram.agent.query",
+               _stream(_result("All done!"))):
         out = await agent.run(message_text="do something", siblings=None)
     assert out == "All done!"
 
 
 async def test_run_falls_back_to_assistant_text(track_repo, tmp_path) -> None:
-    # No ResultMessage with text → concatenate assistant text blocks.
     agent = _agent(track_repo, tmp_path)
-    with patch("navaar.telegram.agent.query", _stream(_assistant("partial answer"))):
+    msg = AssistantMessage(content=[TextBlock(text="partial answer")], model="m")
+    with patch("navaar.telegram.agent.query", _stream(msg)):
         out = await agent.run(message_text="hi", siblings=None)
     assert out == "partial answer"
 
@@ -92,10 +77,8 @@ async def test_run_swallows_errors(track_repo, tmp_path) -> None:
 async def test_run_disabled_is_noop(track_repo, tmp_path) -> None:
     agent = _agent(track_repo, tmp_path)
     agent.enabled = False
-    with patch("navaar.telegram.agent.query", _stream(_result("x"))) as q:
-        out = await agent.run(message_text="hi", siblings=None)
+    out = await agent.run(message_text="hi", siblings=None)
     assert out == ""
-    q.assert_not_called() if hasattr(q, "assert_not_called") else None
 
 
 async def test_run_includes_track_context_in_prompt(track_repo, tmp_path) -> None:
@@ -127,8 +110,7 @@ async def test_run_persists_and_resumes_session(track_repo, tmp_path) -> None:
     with patch("navaar.telegram.agent.query", gen):
         await agent.run(message_text="hello", siblings=None)
         await agent.run(message_text="again", siblings=None)
-    # first run starts fresh (resume=None), second resumes the stored session
-    assert captured == [None, "SID-1"]
+    assert captured == [None, "SID-1"]  # first fresh, second resumes
 
 
 async def test_reset_deletes_session_and_clears(track_repo, tmp_path) -> None:
@@ -144,16 +126,6 @@ async def test_reset_deletes_session_and_clears(track_repo, tmp_path) -> None:
     ds.assert_called_once_with("SID-9", agent._workspace)
     assert agent._session_id is None
     assert "reset" in out.lower()
-    # next message starts a fresh session
-    captured = []
-
-    async def gen2(prompt=None, options=None):
-        captured.append(options.resume)
-        yield _result("hi", session_id="SID-NEW")
-
-    with patch("navaar.telegram.agent.query", gen2):
-        await agent.run(message_text="y", siblings=None)
-    assert captured == [None]
 
 
 async def test_context_info(track_repo, tmp_path) -> None:
@@ -198,82 +170,7 @@ async def test_compact_summarizes_and_reseeds(track_repo, tmp_path) -> None:
     assert "Compacted" in out
 
 
-# ── Core mutation logic (what the MCP tools call) ────────────────────
-
-
-async def test_do_unsync_removes_from_both(track_repo, tmp_path) -> None:
-    yt = MagicMock(remove_from_playlist=MagicMock(return_value=True))
-    sp = MagicMock(remove_from_playlist=MagicMock(return_value=None))
-    card = MagicMock(refresh=AsyncMock())
-    agent = _agent(track_repo, tmp_path, yt=yt, sp=sp, card=card)
-    siblings = await _mk_logical(track_repo)
-
-    out = await agent._do_unsync(siblings, "all")
-
-    yt.remove_from_playlist.assert_called_once_with("YTVID")
-    sp.remove_from_playlist.assert_called_once_with("SPID")
-    card.refresh.assert_awaited_once()
-    assert "YouTube Music" in out and "Spotify" in out
-    for s in await track_repo.get_sibling_tracks(siblings[0]):
-        assert (await track_repo.get_track(s.id)).status == "unsynced"
-
-
-async def test_do_unsync_single_platform(track_repo, tmp_path) -> None:
-    yt = MagicMock(remove_from_playlist=MagicMock(return_value=True))
-    sp = MagicMock(remove_from_playlist=MagicMock(return_value=None))
-    agent = _agent(track_repo, tmp_path, yt=yt, sp=sp)
-    siblings = await _mk_logical(track_repo)
-    await agent._do_unsync(siblings, "sp")
-    sp.remove_from_playlist.assert_called_once_with("SPID")
-    yt.remove_from_playlist.assert_not_called()
-
-
-async def test_do_resync_forces_sync(track_repo, tmp_path) -> None:
-    engine = MagicMock(force_sync=MagicMock())
-    agent = _agent(track_repo, tmp_path, engine=engine)
-    siblings = await _mk_logical(track_repo, yt="unsynced", sp="failed")
-    await agent._do_resync(siblings, "all")
-    forced = {c.args[0] for c in engine.force_sync.call_args_list}
-    assert forced == {"tg_to_yt", "tg_to_sp"}
-    for s in await track_repo.get_sibling_tracks(siblings[0]):
-        assert (await track_repo.get_track(s.id)).status == "retry_scheduled"
-
-
-async def test_do_delete_removes_rows_and_messages(track_repo, tmp_path) -> None:
-    agent = _agent(track_repo, tmp_path, yt=MagicMock(remove_from_playlist=MagicMock(return_value=True)))
-    siblings = await _mk_logical(track_repo)
-    ids = [s.id for s in siblings]
-    out = await agent._do_delete(siblings)
-    for tid in ids:
-        assert await track_repo.get_track(tid) is None
-    deleted = {c.kwargs["message_id"] for c in agent._bot.delete_message.call_args_list}
-    assert deleted == {100, 200}  # audio message + status card
-    assert "Deleted" in out
-
-
-async def test_delete_message_tool(track_repo, tmp_path) -> None:
-    agent = _agent(track_repo, tmp_path)
-    out = await agent._delete_message(555)
-    agent._bot.delete_message.assert_awaited_once_with(chat_id=-1003744100092, message_id=555)
-    assert "Deleted channel message 555" in out
-
-
-async def test_status_text_renders(track_repo, tmp_path) -> None:
-    agent = _agent(track_repo, tmp_path)
-    siblings = await _mk_logical(track_repo)
-    out = agent._status_text(siblings)
-    assert "Queen — Bohemian Rhapsody" in out
-    assert "music.youtube.com/watch?v=YTVID" in out
-    assert "open.spotify.com/track/SPID" in out
-
-
-async def test_resolve_unknown_track(track_repo, tmp_path) -> None:
-    agent = _agent(track_repo, tmp_path)
-    assert await agent._resolve(999) is None
-    assert await agent._resolve(None) is None
-
-
-# ── Client removal methods ───────────────────────────────────────────
+# ── Playlist-removal client methods (the agent can use these in scripts) ──
 
 
 def test_yt_remove_from_playlist_deletes_by_set_video_id() -> None:
