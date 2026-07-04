@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 
 import httpx
@@ -29,6 +31,13 @@ class YTMusicClient:
         self._playlist_id = playlist_id
         self._client_id = client_id
         self._client_secret = client_secret
+        # A single client is shared across up to five directions, and every method
+        # runs on an OS thread via asyncio.to_thread — so the token refresh + on-disk
+        # save must be serialized. Without this, two threads that both observe the
+        # token stale can both truncate-and-rewrite the auth file concurrently and
+        # leave it as invalid JSON, which crashes the *next* boot (the file is the
+        # only copy of the refresh token).
+        self._token_lock = threading.Lock()
         self._token = self._load_token()
         self._ensure_fresh_token()
 
@@ -37,12 +46,23 @@ class YTMusicClient:
             return json.load(f)
 
     def _save_token(self) -> None:
-        with open(self._auth_file, "w") as f:
+        # Atomic write: dump to a temp file in the same dir, then os.replace so a
+        # crash or a racing writer can never leave a half-written token file.
+        tmp = f"{self._auth_file}.tmp"
+        with open(tmp, "w") as f:
             json.dump(self._token, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self._auth_file)
 
     def _ensure_fresh_token(self) -> None:
-        if self._token.get("expires_at", 0) < time.time() + 60:
-            self._refresh_token()
+        if self._token.get("expires_at", 0) >= time.time() + 60:
+            return
+        with self._token_lock:
+            # Re-check under the lock: another thread may have refreshed while we
+            # waited, so we don't refresh (and rewrite the file) twice.
+            if self._token.get("expires_at", 0) < time.time() + 60:
+                self._refresh_token()
 
     def _refresh_token(self) -> None:
         resp = httpx.post(

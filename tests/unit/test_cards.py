@@ -194,6 +194,58 @@ async def test_render_builds_both_links_when_synced(track_repo: TrackRepository)
     assert "https://open.spotify.com/track/SPID" in urls
 
 
+async def test_render_shows_failure_reason_and_retry_button(track_repo: TrackRepository) -> None:
+    primary = await _mk_tg_logical(
+        track_repo, yt=("synced", "YTVID"), sp=("failed", None)
+    )
+    # Give the failed SP row a reason so the card can surface it.
+    siblings = await track_repo.get_sibling_tracks(primary)
+    sp_row = next(s for s in siblings if s.direction == "tg_to_sp")
+    await track_repo.update_track(sp_row.id, failure_reason="no_sp_match")
+
+    svc = TrackCardService(_bot(), -1003744100092, track_repo, sp_enabled=True)
+    siblings = await track_repo.get_sibling_tracks(primary)
+    text, keyboard = svc._render(siblings, "tg")
+
+    assert "❌ failed" in text
+    assert "no_sp_match" in text  # reason surfaced, not a bare "failed"
+    # A tap-to-retry button pointing at the failed row exists.
+    cbs = [b.callback_data for row in keyboard.inline_keyboard for b in row if b.callback_data]
+    assert f"retry_{sp_row.id}" in cbs
+
+
+async def test_render_celebrates_all_platforms(track_repo: TrackRepository) -> None:
+    primary = await _mk_tg_logical(
+        track_repo, yt=("synced", "YTVID"), sp=("duplicate", "SPID")
+    )
+    svc = TrackCardService(_bot(), -1003744100092, track_repo, sp_enabled=True)
+    siblings = await track_repo.get_sibling_tracks(primary)
+    text, _ = svc._render(siblings, "tg")
+    assert "On all platforms" in text
+
+
+async def test_render_no_celebration_when_one_target_pending(track_repo: TrackRepository) -> None:
+    primary = await _mk_tg_logical(
+        track_repo, yt=("synced", "YTVID"), sp=("pending", None)
+    )
+    svc = TrackCardService(_bot(), -1003744100092, track_repo, sp_enabled=True)
+    siblings = await track_repo.get_sibling_tracks(primary)
+    text, _ = svc._render(siblings, "tg")
+    assert "On all platforms" not in text
+
+
+async def test_render_shows_duration_and_added_by(track_repo: TrackRepository) -> None:
+    primary = await track_repo.create_track(
+        direction="tg_to_yt", status="pending", title="Song", artist="Artist",
+        tg_file_id="F", tg_message_id=10, duration_seconds=185, added_by="Sam",
+    )
+    svc = TrackCardService(_bot(), -1003744100092, track_repo, sp_enabled=False)
+    siblings = await track_repo.get_sibling_tracks(primary)
+    text, _ = svc._render(siblings, "tg")
+    assert "3:05" in text          # 185s formatted
+    assert "added by Sam" in text
+
+
 def test_tme_link_for_private_channel(track_repo: TrackRepository) -> None:
     svc = TrackCardService(_bot(), -1003744100092, track_repo, sp_enabled=True)
     assert svc._tme_link(630) == "https://t.me/c/3744100092/630"

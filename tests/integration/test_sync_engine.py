@@ -117,6 +117,41 @@ async def test_cycle_crash_does_not_kill_loop_or_siblings(
 
 
 @pytest.mark.asyncio
+async def test_next_interval_backoff_math(
+    track_repo: TrackRepository,
+    sync_state_repo: SyncStateRepository,
+    mock_tg_to_yt: MagicMock,
+) -> None:
+    # The exponential backoff is a pure function; assert its exact behaviour so a
+    # refactor can't drop the cap (which would let a failing direction back off to
+    # never / hammer the API).
+    engine = SyncEngine(
+        sync_modules={"tg_to_yt": mock_tg_to_yt},
+        intervals={"tg_to_yt": 60},
+        track_repo=track_repo,
+        sync_state=sync_state_repo,
+        backoff_max_seconds=1800,
+    )
+    d = "tg_to_yt"
+    # Healthy (0 failures) -> plain interval.
+    assert engine._next_interval(d, 60) == 60
+    # Doubles per failure: 60*2, *4, *8 ...
+    engine._failures[d] = 1
+    assert engine._next_interval(d, 60) == 120
+    engine._failures[d] = 3
+    assert engine._next_interval(d, 60) == 480
+    # Exponent capped at 5 (60*32=1920 -> clamped to backoff_max 1800).
+    engine._failures[d] = 5
+    assert engine._next_interval(d, 60) == 1800
+    engine._failures[d] = 50
+    assert engine._next_interval(d, 60) == 1800  # never exceeds the cap
+    # After a clean cycle the failure count resets, restoring the base cadence.
+    await engine._on_success(d)
+    assert engine._failures[d] == 0
+    assert engine._next_interval(d, 60) == 60
+
+
+@pytest.mark.asyncio
 async def test_auth_error_is_classified_and_metered(
     track_repo: TrackRepository,
     sync_state_repo: SyncStateRepository,

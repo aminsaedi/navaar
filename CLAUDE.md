@@ -90,6 +90,14 @@ modules (e.g. `tg_to_yt.py`) are ~20 lines: they set class attributes and wire c
 - Phase 1: retry previously failed tracks
 - Phase 2: fetch playlist, diff against stored snapshot (in SyncState), process new IDs
 - Snapshots stored as JSON in SyncState (`yt_playlist_snapshot`, `sp_playlist_snapshot`)
+- **First observation** (snapshot key absent → `get_json` returns `None`, distinct from an
+  empty `[]`) **seeds** the snapshot with the whole current playlist and processes nothing —
+  otherwise every pre-existing track (e.g. when Spotify is first enabled on an already-populated
+  playlist) would be treated as new and mass-uploaded into the channel.
+- The snapshot **advances only for ids that reached the DB** (`has_track_for_direction` is true
+  after the attempt): a new id whose `_sync_new` raised *before* creating its row is left out of
+  the snapshot so the next cycle re-diffs and retries it, instead of being permanently and
+  silently lost. Ids removed from the playlist naturally drop out.
 
 **Blocking clients**: spotipy/ytmusic methods are synchronous; the base classes call them via
 `asyncio.to_thread(...)` so a slow/backed-off external call can't stall the event loop (and the
@@ -114,7 +122,11 @@ exists for the target direction keyed by the same external id before creating a 
 
 `TrackCardService` (`telegram/cards.py`) replies, in the channel, to each track's audio
 message with a live "status card": where it was first seen (TG/YT/SP), per-platform sync
-status, and inline URL buttons to the YT Music / Spotify entries once they exist.
+status, and inline URL buttons to the YT Music / Spotify entries once they exist. The card
+also shows the track duration, "added by …" (from a signed channel post's
+`author_signature`), the failure reason on a failed target, a one-tap "🔄 Retry" button per
+failed target (fires the admin-gated `retry_<id>` callback), and a "🎉 On all platforms"
+line once every target service has the track.
 
 - A *logical track* is the set of `Track` rows sharing the origin's external id
   (`TrackRepository.get_sibling_tracks` keys off the direction's source prefix). One card
@@ -129,6 +141,21 @@ status, and inline URL buttons to the YT Music / Spotify entries once they exist
   a no-op — a card failure can never break a sync.
 - `/card [id]` (admin) posts/refreshes a card on demand (defaults to the most recent track)
   — used to backfill. Gated by `NAVAAR_TRACK_CARDS_ENABLED` (default on).
+
+### Other bot commands (admin)
+
+Beyond the monitoring/action commands, the bot exposes: `/link [id]` (tappable YT/SP/TG
+links for a logical track, DM-friendly), `/health` (logical tracks that landed on some
+services but failed on others — the mesh's partial-sync gap, with inline retry buttons),
+`/digest [days]` (recap of what was added in the window, one line per logical track, default
+7 days). `/search` and `/search_sp` results carry a "➕ Add" button per result
+(`add_yt_<videoId>` / `add_sp_<trackId>` callbacks): tapping adds the track to that source
+playlist and force-syncs the corresponding pull loop, which ingests + fans it out through the
+normal machinery. `/delete <id>` (and the card/`/track` Delete button) performs a **full
+logical delete** via `_purge_logical_track`: removes each populated external id from its
+YT/SP playlist, deletes the channel audio + status-card messages, and deletes every sibling
+row — matching the agent's documented "delete" semantics (it previously removed only one DB
+row while leaving the song live everywhere).
 
 ### Conversational Control
 
@@ -235,7 +262,8 @@ All Prometheus metrics are defined in `metrics.py` and pre-initialized with all 
 - **Retries**: tenacity decorators on external API calls (3 attempts, exponential backoff). Exception: `send_audio` has no retry (timeout likely means upload succeeded)
 - **Cleanup**: downloaded files use `tempfile.mkdtemp(prefix="navaar_")`, cleaned in `finally` blocks
 - **Bot commands**: all gated by `_is_admin(update)` check against configured user IDs
-- **DB migrations**: `engine.py` runs `_run_migrations()` after `create_all` to handle schema changes on existing SQLite DBs (e.g., adding `sp_track_id` column via ALTER TABLE)
+- **DB migrations**: `engine.py` runs `_run_migrations()` after `create_all` to handle schema changes on existing SQLite DBs (e.g., adding `sp_track_id`, `card_message_id`, `added_by` columns via ALTER TABLE)
+- **SQLite concurrency**: `init_db` opens the engine with `connect_args={"timeout": 30}` and a `connect` event listener that sets `PRAGMA journal_mode=WAL` + `busy_timeout=30000` + `synchronous=NORMAL` on every connection. Six sync loops + the bot + the API + the in-pod agent all write through independent sessions; WAL + a generous busy timeout keep a colliding writer waiting instead of raising `database is locked` (a silently-failed sync cycle)
 
 ## Testing
 
@@ -248,7 +276,7 @@ All Prometheus metrics are defined in `metrics.py` and pre-initialized with all 
 
 ## Deployment
 
-CI/CD: push to main → GitHub Actions (ruff lint + pytest w/ coverage gate, then build Docker image → GHCR) → ArgoCD auto-syncs `deploy/k8s/` to k3s cluster. Secrets are managed manually in-cluster (ArgoCD ignores Secret data diffs via `ignoreDifferences`). The deployment uses `Recreate` strategy (SQLite, single writer) and node affinity to avoid the control-plane node.
+CI/CD: push to main → GitHub Actions (ruff lint + pytest w/ coverage gate, then build Docker image → GHCR) → ArgoCD auto-syncs `deploy/k8s/` to k3s cluster. Secrets are managed manually in-cluster (ArgoCD ignores Secret data diffs via `ignoreDifferences`). The deployment uses `Recreate` strategy (SQLite; single pod, but many concurrent in-process writers — see the WAL/busy_timeout note under Repository Pattern) and node affinity to avoid the control-plane node.
 
 The pod runs as non-root (uid 1000); an init-container chowns `/data` to 1000:1000 on start, so `kubectl cp` of files (which land as the local user's uid) no longer needs a manual chown. A `backup-cronjob.yaml` runs a daily SQLite online `.backup` into `/data/backups` (keeps the last 14) on the same node.
 

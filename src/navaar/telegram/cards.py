@@ -42,6 +42,13 @@ _STATUS_ICON = {
 _LINKED_STATUSES = {"synced", "duplicate"}
 
 
+def _fmt_duration(seconds: int | None) -> str:
+    if not seconds or seconds <= 0:
+        return ""
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
+
+
 def _ago(dt: datetime | None) -> str:
     if not dt:
         return ""
@@ -166,11 +173,20 @@ class TrackCardService:
         first_seen = _ago(primary.created_at)
         header = f"\U0001f3b5 <b>{artist} — {title}</b>"
         meta = f"First seen on {_SVC_LABEL.get(prefix, prefix)} · <code>#{primary.id}</code>"
+        dur = _fmt_duration(primary.duration_seconds)
+        if dur:
+            meta += f" · {dur}"
         if first_seen:
             meta += f" · {first_seen}"
+        if primary.added_by:
+            meta += f" · added by {html.escape(primary.added_by)}"
 
         lines = [header, meta, ""]
-        buttons: list[InlineKeyboardButton] = []
+        link_buttons: list[InlineKeyboardButton] = []
+        action_buttons: list[InlineKeyboardButton] = []
+
+        target_svcs = [s for s in self._services() if s != prefix]
+        all_linked = True
 
         for svc in self._services():
             icon = _SVC_ICON.get(svc, "•")
@@ -180,12 +196,30 @@ class TrackCardService:
                 continue
             row = by_dir.get(f"{prefix}_to_{svc}")
             status = row.status if row else "pending"
-            lines.append(f"{icon} {label} · {_STATUS_ICON.get(status, '❓')} {status}")
+            line = f"{icon} {label} · {_STATUS_ICON.get(status, '❓')} {status}"
+            # Show WHY a target failed so a friend can tell "not on Spotify" from a
+            # transient auth outage, instead of a bare "failed".
+            if status == "failed" and row is not None and row.failure_reason:
+                line += f" · <i>{html.escape(row.failure_reason[:60])}</i>"
+            lines.append(line)
+            if status not in _LINKED_STATUSES:
+                all_linked = False
             url = self._target_url(svc, row, status)
             if url:
-                buttons.append(InlineKeyboardButton(_SVC_BTN.get(svc, label), url=url))
+                link_buttons.append(InlineKeyboardButton(_SVC_BTN.get(svc, label), url=url))
+            # A failed target is otherwise a dead end on the shared card — offer a
+            # one-tap retry (the callback is admin-gated in the bot).
+            if status == "failed" and row is not None:
+                action_buttons.append(
+                    InlineKeyboardButton(f"\U0001f504 Retry {label}", callback_data=f"retry_{row.id}")
+                )
 
-        keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
+        # Celebrate the round-trip: every target service now has the track.
+        if target_svcs and all_linked:
+            lines.insert(1, "\U0001f389 <b>On all platforms</b>")
+
+        rows = [r for r in (link_buttons, action_buttons) if r]
+        keyboard = InlineKeyboardMarkup(rows) if rows else None
         return "\n".join(lines), keyboard
 
     def _target_url(self, svc: str, row: Track | None, status: str) -> str | None:

@@ -197,6 +197,42 @@ async def test_cmd_reset_non_admin_ignored() -> None:
 
 
 @pytest.mark.asyncio
+async def test_channel_mention_posts_and_edits_placeholder() -> None:
+    # The channel path posts an editable "On it…" placeholder, then edits it in place
+    # with the real answer (channels don't render typing indicators).
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(return_value="the answer"))
+    placeholder = MagicMock(edit_text=AsyncMock(), delete=AsyncMock())
+    msg = _channel_msg("@navbot what's new")
+    msg.reply_text = AsyncMock(return_value=placeholder)
+    await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
+    placeholder.edit_text.assert_awaited_once()
+    assert placeholder.edit_text.await_args.args[0] == "the answer"
+
+
+@pytest.mark.asyncio
+async def test_channel_mention_cleans_up_orphan_on_edit_failure() -> None:
+    # If editing the placeholder fails (e.g. answer too long), the stale placeholder
+    # is deleted and the answer is delivered as a fresh reply — no orphan left behind.
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(return_value="answer"))
+    placeholder = MagicMock(
+        edit_text=AsyncMock(side_effect=RuntimeError("message is too long")),
+        delete=AsyncMock(),
+    )
+    replies = [placeholder, MagicMock()]
+    msg = _channel_msg("@navbot big question")
+    msg.reply_text = AsyncMock(side_effect=replies)
+    await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
+    placeholder.delete.assert_awaited_once()  # orphan cleaned up
+    # A fresh reply carrying the answer was sent (2nd reply_text call).
+    assert msg.reply_text.await_count == 2
+    assert msg.reply_text.await_args_list[-1].args[0] == "answer"
+
+
+@pytest.mark.asyncio
 async def test_channel_control_command_intercepted() -> None:
     # "@bot /reset" in the channel runs the control, not the agent.
     bot = _make_bot(sp_client=MagicMock())

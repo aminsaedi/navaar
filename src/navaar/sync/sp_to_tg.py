@@ -75,9 +75,12 @@ class SpToTgSync(BasePullSync):
     async def _sync_new(self, sp_track_id: str, meta: dict) -> None:
         start = time.monotonic()
 
+        # Skip if any row already tracks this Spotify id and isn't a plain failure
+        # (covers a row mid-sync on the push side too), preventing a duplicate
+        # re-upload; a "failed" row is left for a genuine retry.
         existing = await self._tracks.get_track_by_sp_track_id(sp_track_id)
-        if existing and existing.status in ("synced", "duplicate"):
-            logger.debug("sp_to_tg_already_synced", sp_track_id=sp_track_id)
+        if existing and existing.status != "failed":
+            logger.debug("sp_to_tg_already_tracked", sp_track_id=sp_track_id, status=existing.status)
             return
 
         name = meta.get("name", sp_track_id)

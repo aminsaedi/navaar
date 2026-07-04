@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from navaar.db.models import SyncLog, SyncState, Track
@@ -279,6 +279,39 @@ class TrackRepository:
             await session.delete(track)
             await session.commit()
             return True
+
+    async def delete_tracks(self, ids: list[int]) -> int:
+        """Delete several rows at once (the sibling rows of a logical track).
+        Returns the number of rows deleted."""
+        if not ids:
+            return 0
+        async with self._sf() as session:
+            result = await session.execute(delete(Track).where(Track.id.in_(ids)))
+            await session.commit()
+            return result.rowcount  # type: ignore[return-value]
+
+    async def get_tracks_since(self, since: datetime, direction: str | None = None) -> list[Track]:
+        """All tracks created at/after ``since`` (for time-windowed views like
+        /digest), newest first."""
+        async with self._sf() as session:
+            stmt = (
+                select(Track)
+                .where(Track.created_at >= since)
+                .order_by(Track.id.desc())
+            )
+            if direction:
+                stmt = stmt.where(Track.direction == direction)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    async def get_all_tracks(self, limit: int = 5000) -> list[Track]:
+        """Every track row (bounded), oldest first — for whole-DB groupings such as
+        the /health partial-sync report on a small deployment."""
+        async with self._sf() as session:
+            result = await session.execute(
+                select(Track).order_by(Track.id).limit(limit)
+            )
+            return list(result.scalars().all())
 
 
 class SyncStateRepository:

@@ -112,17 +112,23 @@ async def test_first_run_empty_snapshot(
         {"id": "sp2", "name": "Song Two", "artists": ["Artist B"], "duration_ms": 240000, "uri": "spotify:track:sp2"},
     ]
     sp_client = _make_sp_client(sp_tracks)
-    # No snapshot at all
+    # No snapshot at all: first observation seeds the snapshot and imports nothing,
+    # rather than mass-downloading a pre-existing Spotify playlist into the channel.
     sync = SpToTgSync(
         track_repo, sync_state_repo, sync_log_repo,
         mock_tg_client, sp_client, mock_yt_client, mock_downloader,
     )
     result = await sync.process_new_tracks()
-    assert result == 2
+    assert result == 0
+    mock_downloader.download.assert_not_called()
 
-    # Snapshot should now be saved
+    # Snapshot is seeded with the current playlist so nothing is re-imported.
     snapshot = await sync_state_repo.get_json("sp_playlist_snapshot")
     assert snapshot == ["sp1", "sp2"]
+
+    # A subsequent unchanged cycle still processes nothing.
+    assert await sync.process_new_tracks() == 0
+    mock_downloader.download.assert_not_called()
 
 
 @pytest.mark.asyncio

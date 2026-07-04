@@ -26,6 +26,11 @@ class Track(Base):
     sp_track_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
     yt_set_video_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Who added the track, when knowable. For a Telegram channel post this is
+    # message.author_signature (populated only when the channel has "Sign messages"
+    # on); NULL otherwise (pull-side tracks have no human adder). Rendered on the
+    # status card as "added by …".
+    added_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Telegram message id of this logical track's status card (a reply to the
     # track's audio message). Stamped onto every sibling row so any direction can
     # find and edit the same card. NULL until the card is first posted.

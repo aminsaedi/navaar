@@ -13,6 +13,7 @@ from navaar.metrics import (
     TRACKS_SYNCED,
     YT_DOWNLOAD_TOTAL,
 )
+from navaar.services import sync_caption
 from navaar.telegram.client import TelegramClient
 from navaar.ytmusic.downloader import YTDownloader
 
@@ -78,25 +79,59 @@ class BasePullSync:
         current_ids = [t[self.id_key] for t in playlist_tracks if t.get(self.id_key)]
 
         prev_snapshot = await self._state.get_json(self.snapshot_key)
+
+        # First observation: no snapshot has ever been stored (None, not []). Seed
+        # it with the whole current playlist and process nothing — otherwise every
+        # pre-existing track would be treated as "new" and mass-downloaded into the
+        # channel. This is the first-boot / Spotify-just-enabled case; the group
+        # never asked for a bulk import of songs that predate Navaar.
+        if prev_snapshot is None:
+            logger.info(
+                f"{self.direction}_snapshot_seeded", count=len(current_ids),
+            )
+            await self._state.set_json(self.snapshot_key, current_ids)
+            return synced
+
         prev_ids = set(prev_snapshot) if isinstance(prev_snapshot, list) else set()
         new_ids = [i for i in current_ids if i not in prev_ids]
 
+        # Track which new ids are "handled" and should stay in the snapshot. An id is
+        # handled when _sync_new returns normally — whether it ingested the track OR
+        # deliberately skipped an id already handled elsewhere in the mesh (a pushed /
+        # fanned-out id, the common steady state, which has no row for THIS pull
+        # direction). An id whose _sync_new *raised before creating any row* (e.g. a
+        # transient DB error) is left OUT so the next cycle re-diffs and retries it,
+        # instead of the track being permanently and silently lost.
+        recorded: set[str] = set()
         if new_ids:
             logger.info(f"{self.direction}_new_tracks", count=len(new_ids))
             lookup = {t[self.id_key]: t for t in playlist_tracks if t.get(self.id_key)}
             for new_id in new_ids:
+                raised = False
                 try:
                     await self._sync_new(new_id, lookup.get(new_id, {}))
                     synced += 1
                 except Exception:
+                    raised = True
                     logger.error(
                         f"{self.direction}_track_error",
                         external_id=new_id,
                         exc_info=True,
                     )
                     SYNC_ERRORS.labels(direction=self.direction, error_type="sync_failed").inc()
+                # Normal return → handled → record. A raise that still left a row (e.g.
+                # a download failure after create_track) is also recorded — Part-1 /
+                # manual retry owns recovery. Only a raise with NO row anywhere is
+                # omitted, so the id is retried via the diff next cycle.
+                if not raised or await self._row_exists(new_id):
+                    recorded.add(new_id)
 
-        await self._state.set_json(self.snapshot_key, current_ids)
+        # Advance the snapshot to: ids already known (in prev_ids) + newly-recorded
+        # ids, intersected with what's still present. Un-ingested new ids are omitted
+        # so they're retried; ids removed from the playlist naturally drop out.
+        keep = prev_ids | recorded
+        next_snapshot = [i for i in current_ids if i in keep]
+        await self._state.set_json(self.snapshot_key, next_snapshot)
         return synced
 
     async def _download_and_upload(
@@ -130,7 +165,7 @@ class BasePullSync:
                 raise
 
             try:
-                caption = f"Synced by Navaar | #{track_id}"
+                caption = sync_caption(self.direction, track_id)
                 message_id = await self._tg.send_audio(
                     file_path=local_path,
                     title=title,
@@ -164,6 +199,20 @@ class BasePullSync:
                 self._dl.cleanup(local_path)
         finally:
             await self._emit_card(track_id)
+
+    async def _row_exists(self, external_id: str) -> bool:
+        """Does ANY row (any direction) already track this external id? Used to decide
+        whether a raised _sync_new left a recoverable row behind. Resilient: a failure
+        of the lookup itself must not crash the cycle — return False so the id is
+        retried next cycle rather than lost."""
+        try:
+            if self.id_field == "yt_video_id":
+                return await self._tracks.get_track_by_yt_video_id(external_id) is not None
+            if self.id_field == "sp_track_id":
+                return await self._tracks.get_track_by_sp_track_id(external_id) is not None
+        except Exception:
+            return False
+        return False
 
     async def _retry_track(self, track) -> None:  # pragma: no cover - overridden
         raise NotImplementedError

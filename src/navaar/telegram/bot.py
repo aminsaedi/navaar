@@ -5,7 +5,7 @@ import contextlib
 import html
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -28,6 +28,7 @@ from telegram.ext import (
 
 from navaar.db.repository import SyncLogRepository, SyncStateRepository, TrackRepository
 from navaar.metrics import RETRIES_TOTAL, TRACKS_DISCOVERED
+from navaar.services import SVC_ICON, SVC_LABEL, is_sync_caption
 from navaar.sync.fanout import FanOut
 
 if TYPE_CHECKING:
@@ -151,7 +152,15 @@ class NavaarBot:
         if message.chat_id != self._channel_id:
             return
 
-        # Ignore messages sent by the bot itself (YT->TG uploads)
+        # Ignore the bot's own YT/SP->TG uploads. Channel posts are attributed to the
+        # channel (from_user is None), so the bot can't recognise its uploads by
+        # sender — it recognises them by the structured sync caption (marker + `· #id`),
+        # which travels with the message and works even before the upload's DB row is
+        # committed. Matching the full structure (not a bare substring) avoids dropping
+        # a human post that merely happens to mention the marker phrase.
+        if is_sync_caption(message.caption):
+            logger.debug("tg_ignoring_own_upload", message_id=message.message_id)
+            return
         if message.from_user and message.from_user.id == context.bot.id:
             logger.debug("tg_ignoring_own_message", message_id=message.message_id)
             return
@@ -179,6 +188,9 @@ class NavaarBot:
             return
 
         title = audio.title or audio.file_name or "Unknown"
+        # Attribution, when the channel has "Sign messages" enabled: channel posts
+        # carry author_signature (the poster's name) even though from_user is None.
+        added_by = message.author_signature or None
 
         # Create primary tg_to_yt track
         track = await self._tracks.create_track(
@@ -190,6 +202,7 @@ class NavaarBot:
             tg_file_id=audio.file_id,
             tg_file_unique_id=audio.file_unique_id,
             duration_seconds=audio.duration,
+            added_by=added_by,
         )
         TRACKS_DISCOVERED.labels(direction="tg_to_yt").inc()
         await self._log.log(
@@ -253,8 +266,31 @@ class NavaarBot:
         if ctrl is not None:
             await message.reply_text(await ctrl(), disable_web_page_preview=True)
             return
+
+        # Feedback in the channel: Telegram does NOT render typing indicators in
+        # channels, so post an editable placeholder and swap in the real answer when
+        # the agent finishes (it can run up to nl_request_timeout seconds). Without
+        # this the channel looks dead and friends re-post. Best-effort throughout.
+        placeholder = None
+        with contextlib.suppress(Exception):
+            placeholder = await message.reply_text(
+                "\U0001f916 On it…", disable_web_page_preview=True
+            )
         result = await self._agent.run(message_text=text, siblings=siblings)
-        await message.reply_text(result, disable_web_page_preview=True)
+        edited = False
+        if placeholder is not None:
+            with contextlib.suppress(Exception):
+                await placeholder.edit_text(result, disable_web_page_preview=True)
+                edited = True
+            if not edited:
+                # Edit failed (e.g. result too long) — drop the stale placeholder so it
+                # doesn't linger beside the real reply.
+                with contextlib.suppress(Exception):
+                    await placeholder.delete()
+        if not edited:
+            # Suppressed so an oversized reply can't propagate out of the handler.
+            with contextlib.suppress(Exception):
+                await message.reply_text(result, disable_web_page_preview=True)
 
     async def _handle_dm_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -369,9 +405,12 @@ class NavaarBot:
             "<b>Monitoring</b>\n"
             "/status \u2014 Live sync status dashboard\n"
             "/stats \u2014 Aggregate statistics\n"
+            "/health \u2014 Tracks missing on some platforms\n"
+            "/digest [days] \u2014 Recap of recent additions\n"
             "/queue \u2014 Pending tracks waiting to sync\n"
-            "/recent [n] \u2014 Last n synced tracks (default 10)\n"
+            "/recent [n] \u2014 Last n tracks, any status (default 10)\n"
             "/track &lt;id&gt; \u2014 Full details for a track\n"
+            "/link [id] \u2014 Tappable platform links for a track\n"
             "/card [id] \u2014 Post/refresh a track's status card\n"
             "/logs [n] \u2014 Recent sync log entries\n"
             "\n"
@@ -589,6 +628,179 @@ class NavaarBot:
             lines.append(f"{_track_line(t)}  <i>{synced_str}</i>")
         await self._reply(update, "\n".join(lines))
 
+    # ── Logical-track grouping (shared by /health and /digest) ───────
+
+    @staticmethod
+    def _logical_key(t) -> tuple[str, str] | None:
+        """(origin_prefix, origin_external_id) — the identity of the logical track a
+        row belongs to. None when the origin id isn't populated yet."""
+        prefix = t.direction.split("_to_")[0]
+        field = {"tg": "tg_file_id", "yt": "yt_video_id", "sp": "sp_track_id"}.get(prefix)
+        value = getattr(t, field) if field else None
+        return (prefix, value) if value else None
+
+    def _group_logical(self, tracks: list) -> dict:
+        """Group rows into logical tracks keyed by origin. Value: {prefix, rows}."""
+        groups: dict[tuple[str, str], dict] = {}
+        for t in tracks:
+            key = self._logical_key(t)
+            if key is None:
+                continue
+            g = groups.setdefault(key, {"prefix": key[0], "rows": []})
+            g["rows"].append(t)
+        return groups
+
+    # ── /health ──────────────────────────────────────────────────────
+
+    async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Report logical tracks that landed on some services but not others — the
+        mesh's characteristic partial-sync gap (e.g. on YouTube Music but failed on
+        Spotify), which aggregate /stats and per-direction /failed both hide."""
+        if not self._is_admin(update):
+            return
+        all_tracks = await self._tracks.get_all_tracks()
+        groups = self._group_logical(all_tracks)
+
+        partials = []
+        for _key, g in groups.items():
+            failed = [r for r in g["rows"] if r.status == "failed"]
+            if failed:
+                partials.append((g, failed))
+
+        if not partials:
+            await self._reply(
+                update,
+                "✅ <b>Health:</b> every tracked song is synced across its platforms "
+                "(no partial-sync gaps).",
+            )
+            return
+
+        # Newest logical track first (by max row id in the group).
+        partials.sort(key=lambda p: max(r.id for r in p[0]["rows"]), reverse=True)
+        lines = [f"<b>\U0001fa7a Health — {len(partials)} partial track(s)</b>", ""]
+        buttons = []
+        for g, failed in partials[:15]:
+            rows = g["rows"]
+            primary = min(rows, key=lambda r: r.id)
+            artist = html.escape(primary.artist or "Unknown")
+            title = html.escape(primary.title or "")
+            src = SVC_LABEL.get(g["prefix"], g["prefix"])
+            miss = ", ".join(
+                f"{SVC_LABEL.get(r.direction.split('_to_')[1], r.direction)}"
+                for r in failed
+            )
+            lines.append(f"❌ <code>#{primary.id}</code> {artist} — {title}")
+            lines.append(f"   from {src} · missing on <b>{miss}</b>")
+            # One retry button per failed target (not just the first), so a track
+            # missing on two platforms can be fully re-queued in one pass.
+            buttons.append([
+                InlineKeyboardButton(
+                    f"\U0001f504 #{primary.id} {SVC_LABEL.get(r.direction.split('_to_')[1], r.direction)}",
+                    callback_data=f"retry_{r.id}",
+                )
+                for r in failed
+            ])
+        if len(partials) > 15:
+            lines.append(f"\n<i>... and {len(partials) - 15} more</i>")
+        keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+        await self._reply(update, "\n".join(lines), reply_markup=keyboard)
+
+    # ── /digest [days] ───────────────────────────────────────────────
+
+    async def _cmd_digest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """A recap of what the group added recently (default: last 7 days), one line
+        per logical track — turns the shared playlist into a weekly ritual."""
+        if not self._is_admin(update):
+            return
+        days = 7
+        if context.args:
+            try:
+                days = max(1, min(int(context.args[0]), 90))
+            except ValueError:
+                pass
+        since = datetime.now(UTC) - timedelta(days=days)
+        tracks = await self._tracks.get_tracks_since(since)
+        groups = self._group_logical(tracks)
+        if not groups:
+            await self._reply(update, f"\U0001f4ed Nothing added in the last {days} day(s).")
+            return
+
+        # Newest logical track first.
+        ordered = sorted(
+            groups.values(), key=lambda g: max(r.id for r in g["rows"]), reverse=True
+        )
+        lines = [
+            f"<b>\U0001f4c5 Digest — {len(ordered)} track(s) in the last {days} day(s)</b>",
+            "",
+        ]
+        for g in ordered[:30]:
+            rows = g["rows"]
+            primary = min(rows, key=lambda r: r.id)
+            artist = html.escape(primary.artist or "Unknown")
+            title = html.escape(primary.title or "")
+            icon = SVC_ICON.get(g["prefix"], "\U0001f3b5")
+            # A compact per-service status footprint.
+            marks = []
+            for r in sorted(rows, key=lambda r: r.id):
+                tgt = r.direction.split("_to_")[1]
+                marks.append(f"{SVC_ICON.get(tgt, tgt)}{_S.get(r.status, '')}")
+            lines.append(f"{icon} {artist} — {title}  {' '.join(marks)}")
+        if len(ordered) > 30:
+            lines.append(f"\n<i>... and {len(ordered) - 30} more</i>")
+        await self._reply(update, "\n".join(lines))
+
+    # ── /link [id] ───────────────────────────────────────────────────
+
+    async def _cmd_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reply with tappable YouTube Music / Spotify / Telegram links for a track
+        (defaults to the most recent) — a lightweight, shareable alternative to the
+        verbose /track dump, usable in a DM."""
+        if not self._is_admin(update):
+            return
+        if context.args:
+            try:
+                track_id = int(context.args[0].lstrip("#"))
+            except ValueError:
+                await self._reply(update, "❌ Invalid track ID.")
+                return
+            t = await self._tracks.get_track(track_id)
+        else:
+            recent = await self._tracks.get_recent_tracks(limit=1)
+            t = recent[0] if recent else None
+        if not t:
+            await self._reply(update, "❌ No track found.")
+            return
+
+        siblings = await self._tracks.get_sibling_tracks(t)
+        yt = next((s.yt_video_id for s in siblings if s.yt_video_id), None)
+        sp = next((s.sp_track_id for s in siblings if s.sp_track_id), None)
+        tg_msg = min((s.tg_message_id for s in siblings if s.tg_message_id), default=None)
+
+        buttons = []
+        if yt:
+            buttons.append(InlineKeyboardButton(
+                "▶️ YouTube Music", url=f"https://music.youtube.com/watch?v={yt}"))
+        if sp:
+            buttons.append(InlineKeyboardButton(
+                "\U0001f7e2 Spotify", url=f"https://open.spotify.com/track/{sp}"))
+        tme = self._tme_link(tg_msg) if tg_msg else None
+        if tme:
+            buttons.append(InlineKeyboardButton("\U0001f4e8 Telegram", url=tme))
+
+        artist = html.escape(t.artist or "Unknown")
+        title = html.escape(t.title or "")
+        header = f"\U0001f517 <b>{artist} — {title}</b> (#{t.id})"
+        if not buttons:
+            await self._reply(update, f"{header}\n<i>No platform links yet.</i>")
+            return
+        await self._reply(update, header, reply_markup=InlineKeyboardMarkup([buttons]))
+
+    def _tme_link(self, message_id: int) -> str | None:
+        cid = str(self._channel_id)
+        if cid.startswith("-100"):
+            return f"https://t.me/c/{cid[4:]}/{message_id}"
+        return None
+
     # ── /track <id> ──────────────────────────────────────────────────
 
     async def _cmd_track(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -790,6 +1002,19 @@ class NavaarBot:
         labels = [_DIR.get(d, d) for d in directions]
         await self._reply(update, f"\U0001f504 Sync triggered: {', '.join(labels)}")
 
+    async def _reset_all_failed_metered(self) -> int:
+        """Reset every failed track for retry, incrementing RETRIES_TOTAL by each
+        direction's OWN count. Resetting globally and then adding the global total to
+        all six direction counters (the old code) over-counted the metric 6x and
+        attributed retries to directions that had none. Returns the true total."""
+        total = 0
+        for d in _DIR:
+            count = await self._tracks.reset_all_failed(d)
+            if count:
+                RETRIES_TOTAL.labels(direction=d).inc(count)
+            total += count
+        return total
+
     # ── /retry <id|all|tg|yt|sp> ─────────────────────────────────────
 
     async def _cmd_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -801,9 +1026,7 @@ class NavaarBot:
 
         arg = context.args[0].lower()
         if arg == "all":
-            count = await self._tracks.reset_all_failed()
-            for d in _DIR:
-                RETRIES_TOTAL.labels(direction=d).inc(count)
+            count = await self._reset_all_failed_metered()
             await self._reply(update, f"\U0001f504 Reset {count} failed tracks for retry.")
         elif arg in ("tg", "tg_to_yt"):
             count = await self._tracks.reset_all_failed("tg_to_yt")
@@ -854,11 +1077,79 @@ class NavaarBot:
             await self._reply(update, "\u274c Invalid track ID.")
             return
 
-        deleted = await self._tracks.delete_track(track_id)
-        if deleted:
-            await self._reply(update, f"\U0001f5d1 Track #{track_id} deleted.")
-        else:
-            await self._reply(update, f"\u274c Track #{track_id} not found.")
+        summary = await self._purge_logical_track(track_id)
+        await self._reply(update, summary)
+
+    async def _purge_logical_track(self, track_id: int) -> str:
+        """Fully remove a *logical* track: take it off both playlists, delete its
+        channel audio message(s) and status card, and delete every sibling DB row \u2014
+        matching the documented 'delete' semantics. Previously /delete removed only a
+        single DB row, leaving the song live on both playlists and in the channel
+        while replying 'deleted' (a false success). Each external step is best-effort
+        so one failure can't block the rest; returns an HTML summary of what happened."""
+        track = await self._tracks.get_track(track_id)
+        if not track:
+            return f"\u274c Track #{track_id} not found."
+        siblings = await self._tracks.get_sibling_tracks(track)
+
+        yt_ids = {s.yt_video_id for s in siblings if s.yt_video_id}
+        sp_ids = {s.sp_track_id for s in siblings if s.sp_track_id}
+        msg_ids = {
+            m
+            for s in siblings
+            for m in (s.tg_message_id, s.card_message_id)
+            if m
+        }
+
+        removed: list[str] = []
+        for vid in yt_ids:
+            if self._yt is not None and await self._safe_remove(self._yt, vid, "yt"):
+                removed.append("YT")
+        for sid in sp_ids:
+            if self._sp is not None and await self._safe_remove(self._sp, sid, "sp"):
+                removed.append("SP")
+
+        deleted_msgs = 0
+        for mid in msg_ids:
+            if await self._safe_delete_message(mid):
+                deleted_msgs += 1
+
+        rows = await self._tracks.delete_tracks([s.id for s in siblings])
+
+        artist = html.escape(track.artist or "Unknown")
+        title = html.escape(track.title or "")
+        parts = [f"\U0001f5d1 Deleted <b>{artist} \u2014 {title}</b> (#{track_id})"]
+        detail = []
+        if removed:
+            detail.append("removed from " + "+".join(sorted(set(removed))))
+        if deleted_msgs:
+            detail.append(f"{deleted_msgs} channel message(s) deleted")
+        detail.append(f"{rows} DB row(s) removed")
+        parts.append("\u2022 " + "; ".join(detail))
+        return "\n".join(parts)
+
+    async def _safe_remove(self, client: object, ext_id: str, svc: str) -> bool:
+        """Remove one external id from a playlist off the event loop; swallow errors.
+        Reflects the real outcome so the /delete summary doesn't overstate: the YT
+        client returns False when the id wasn't actually in the playlist (don't claim
+        removal then); the SP client returns None (no signal) — treat a clean call as
+        done."""
+        try:
+            result = await asyncio.to_thread(client.remove_from_playlist, ext_id)
+        except Exception:
+            logger.warning("purge_playlist_remove_failed", service=svc, ext_id=ext_id, exc_info=True)
+            return False
+        return True if result is None else bool(result)
+
+    async def _safe_delete_message(self, message_id: int) -> bool:
+        if self._app is None:
+            return False
+        try:
+            await self._app.bot.delete_message(chat_id=self._channel_id, message_id=message_id)
+            return True
+        except Exception:
+            logger.debug("purge_delete_message_failed", message_id=message_id, exc_info=True)
+            return False
 
     # ── /search <query> ──────────────────────────────────────────────
 
@@ -886,14 +1177,21 @@ class NavaarBot:
             return
 
         lines = [f"<b>\U0001f3b5 Results for: {html.escape(query)}</b>\n"]
+        buttons = []
         for i, r in enumerate(results, 1):
             artists = ", ".join(a["name"] for a in r.get("artists", []))
             vid = r.get("videoId", "?")
+            title = r.get("title", "?")
             lines.append(
-                f"{i}. {html.escape(artists)} \u2014 {html.escape(r.get('title', '?'))}\n"
+                f"{i}. {html.escape(artists)} \u2014 {html.escape(title)}\n"
                 f"   <code>{vid}</code>"
             )
-        await self._reply(update, "\n".join(lines))
+            if vid and vid != "?":
+                buttons.append([
+                    InlineKeyboardButton(f"\u2795 Add #{i}: {title[:30]}", callback_data=f"add_yt_{vid}")
+                ])
+        keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+        await self._reply(update, "\n".join(lines), reply_markup=keyboard)
 
     # ── /search_sp <query> ───────────────────────────────────────────
 
@@ -921,14 +1219,60 @@ class NavaarBot:
             return
 
         lines = [f"<b>\U0001f3b6 Spotify Results for: {html.escape(query)}</b>\n"]
+        buttons = []
         for i, r in enumerate(results, 1):
             artists = ", ".join(r.get("artists", []))
             tid = r.get("id", "?")
+            name = r.get("name", "?")
             lines.append(
-                f"{i}. {html.escape(artists)} \u2014 {html.escape(r.get('name', '?'))}\n"
+                f"{i}. {html.escape(artists)} \u2014 {html.escape(name)}\n"
                 f"   <code>{tid}</code>"
             )
-        await self._reply(update, "\n".join(lines))
+            if tid and tid != "?":
+                buttons.append([
+                    InlineKeyboardButton(f"\u2795 Add #{i}: {name[:30]}", callback_data=f"add_sp_{tid}")
+                ])
+        keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+        await self._reply(update, "\n".join(lines), reply_markup=keyboard)
+
+    # \u2500\u2500 Search-and-add: add a chosen result to the shared playlists \u2500\u2500
+
+    async def _handle_add_callback(self, query, data: str) -> None:
+        """Add a track chosen from a /search result to the shared playlists. We add
+        it to the source playlist (YT or SP) and let the existing pull loop ingest +
+        fan it out to the other services \u2014 reusing all the dedup/fan-out machinery \u2014
+        then force that loop to run now. Admin-gated by the caller."""
+        try:
+            _, svc, ext_id = data.split("_", 2)
+        except ValueError:
+            return
+        if svc == "yt" and self._yt is not None:
+            try:
+                await asyncio.to_thread(self._yt.add_to_playlist, ext_id)
+            except Exception:
+                logger.warning("add_yt_failed", ext_id=ext_id, exc_info=True)
+                await query.message.reply_text("\u274c Couldn't add to YouTube Music.")
+                return
+            if self._engine:
+                self._engine.force_sync("yt_to_tg")
+            await query.message.reply_text(
+                "\u2705 Added to YouTube Music \u2014 it'll sync to the channel"
+                + (" and Spotify" if self._sp_enabled else "") + " shortly.",
+            )
+        elif svc == "sp" and self._sp is not None:
+            try:
+                await asyncio.to_thread(self._sp.add_to_playlist, ext_id)
+            except Exception:
+                logger.warning("add_sp_failed", ext_id=ext_id, exc_info=True)
+                await query.message.reply_text("\u274c Couldn't add to Spotify.")
+                return
+            if self._engine:
+                self._engine.force_sync("sp_to_tg")
+            await query.message.reply_text(
+                "\u2705 Added to Spotify \u2014 it'll sync to the channel and YouTube Music shortly.",
+            )
+        else:
+            await query.message.reply_text("\u274c That service isn't available.")
 
     # ── Inline button callbacks ──────────────────────────────────────
 
@@ -941,9 +1285,7 @@ class NavaarBot:
         data = query.data
         await query.answer()
 
-        if data.startswith("sync_") and not data.startswith("sync_tg") and not data.startswith("sync_yt") and not data.startswith("sync_sp"):
-            pass  # fall through
-        elif data in ("sync_tg_to_yt", "sync_yt_to_tg", "sync_sp_to_tg", "sync_sp_to_yt"):
+        if data in ("sync_tg_to_yt", "sync_yt_to_tg", "sync_sp_to_tg", "sync_sp_to_yt"):
             if self._engine:
                 self._engine.force_sync(data.removeprefix("sync_"))
                 label = _DIR.get(data.removeprefix("sync_"), data)
@@ -955,9 +1297,7 @@ class NavaarBot:
         elif data == "show_stats":
             await self._cmd_stats(update, context)
         elif data == "retry_all":
-            count = await self._tracks.reset_all_failed()
-            for d in _DIR:
-                RETRIES_TOTAL.labels(direction=d).inc(count)
+            count = await self._reset_all_failed_metered()
             await query.message.reply_text(
                 f"\U0001f504 Reset {count} failed tracks for retry.", parse_mode="HTML"
             )
@@ -967,6 +1307,10 @@ class NavaarBot:
             if track and track.status == "failed":
                 await self._tracks.reset_for_retry(track_id)
                 RETRIES_TOTAL.labels(direction=track.direction).inc()
+                if self._engine:
+                    self._engine.force_sync(track.direction)
+                if self._card:
+                    await self._card.refresh(track_id)
                 await query.message.reply_text(
                     f"\U0001f504 Track #{track_id} queued for retry.", parse_mode="HTML"
                 )
@@ -976,15 +1320,12 @@ class NavaarBot:
                 )
         elif data.startswith("delete_"):
             track_id = int(data.split("_")[1])
-            deleted = await self._tracks.delete_track(track_id)
-            if deleted:
-                await query.message.reply_text(
-                    f"\U0001f5d1 Track #{track_id} deleted.", parse_mode="HTML"
-                )
-            else:
-                await query.message.reply_text(
-                    f"\u274c Track #{track_id} not found.", parse_mode="HTML"
-                )
+            summary = await self._purge_logical_track(track_id)
+            await query.message.reply_text(summary, parse_mode="HTML")
+        elif data.startswith("add_"):
+            await self._handle_add_callback(query, data)
+        else:
+            logger.warning("unknown_callback", data=data)
 
     # ── Slash-command menu ───────────────────────────────────────────
 
@@ -996,8 +1337,11 @@ class NavaarBot:
             BotCommand("status", "Live sync status dashboard"),
             BotCommand("stats", "Aggregate statistics"),
             BotCommand("queue", "Pending tracks waiting to sync"),
-            BotCommand("recent", "Last N synced tracks: /recent [n]"),
+            BotCommand("recent", "Last N tracks, any status: /recent [n]"),
             BotCommand("track", "Full details for a track: /track <id>"),
+            BotCommand("link", "Tappable platform links: /link [id]"),
+            BotCommand("health", "Tracks missing on some platforms"),
+            BotCommand("digest", "Recap of recent additions: /digest [days]"),
             BotCommand("card", "Post/refresh a track's status card: /card [id]"),
             BotCommand("logs", "Recent sync log entries: /logs [n]"),
             BotCommand("sync", "Force sync: /sync [tg|yt|sp|all]"),
@@ -1085,6 +1429,9 @@ class NavaarBot:
             "queue": self._cmd_queue,
             "recent": self._cmd_recent,
             "track": self._cmd_track,
+            "link": self._cmd_link,
+            "health": self._cmd_health,
+            "digest": self._cmd_digest,
             "card": self._cmd_card,
             "logs": self._cmd_logs,
             "failed": self._cmd_failed,

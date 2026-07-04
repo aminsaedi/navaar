@@ -126,7 +126,11 @@ class BasePushSync:
             logger.info("duplicate_skipped", track_id=track.id, **{t.db_field: ext_id})
             return
 
-        await self._tracks.update_track(track.id, status="syncing")
+        # Persist the external id at "syncing", *before* add_to_playlist, so the
+        # opposite pull direction can correlate this row if it diffs the playlist in
+        # the window between the entry landing on the service and mark_synced — which
+        # otherwise causes a duplicate re-upload (the row has no id to match on yet).
+        await self._tracks.update_track(track.id, status="syncing", **{t.db_field: ext_id})
         await asyncio.to_thread(self._target.add_to_playlist, ext_id)
 
         await self._tracks.mark_synced(track.id, **{t.db_field: ext_id})

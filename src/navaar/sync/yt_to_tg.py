@@ -54,9 +54,13 @@ class YtToTgSync(BasePullSync):
     async def _sync_new(self, video_id: str, meta: dict) -> None:
         start = time.monotonic()
 
+        # Skip if any row already tracks this video and isn't a plain failure — this
+        # covers not just synced/duplicate but a row mid-sync on the push side
+        # (tg_to_yt in "syncing" with the id already written), preventing a duplicate
+        # re-upload. A "failed" row is not skipped so a genuine retry can proceed.
         existing = await self._tracks.get_track_by_yt_video_id(video_id)
-        if existing and existing.status in ("synced", "duplicate"):
-            logger.debug("yt_to_tg_already_synced", video_id=video_id)
+        if existing and existing.status != "failed":
+            logger.debug("yt_to_tg_already_tracked", video_id=video_id, status=existing.status)
             return
 
         title = meta.get("title", video_id)
