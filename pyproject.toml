@@ -8,9 +8,16 @@ dependencies = [
     # between majors (e.g. spotipy removed get_access_token(as_dict=) which broke the
     # PKCE auth path). yt-dlp is intentionally floor-only — it breaks *backwards* as
     # sites change, so it must stay free to float (refresh via the lockfile).
+    #
+    # The floor tracks the oldest release known to still work, not the oldest that
+    # merely installs: YouTube's SABR-only rollout made every build before
+    # 2026.8.19 return "HTTP Error 403: Forbidden" on audio downloads, which broke
+    # yt→tg and sp→tg for ~6 months of lockfile drift. Bump this whenever a
+    # server-side change makes older clients fail, and refresh the lock regularly
+    # (`uv lock --upgrade-package yt-dlp`) — a stale lock is the failure mode here.
     "ytmusicapi>=1.8.0,<2",
     "python-telegram-bot>=21.0,<23",
-    "yt-dlp>=2024.1.0",
+    "yt-dlp>=2026.8.19",
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20.0",
     "fastapi>=0.115.0",

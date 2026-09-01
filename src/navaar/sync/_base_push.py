@@ -15,7 +15,7 @@ from navaar.metrics import (
 )
 from navaar.sync._targets import TargetAdapter
 from navaar.sync.identifier import identify_track
-from navaar.telegram.client import TelegramClient
+from navaar.telegram.client import FileTooBigError, TelegramClient
 
 logger = structlog.get_logger()
 
@@ -155,7 +155,18 @@ class BasePushSync:
         local_path = None
         try:
             if track.tg_file_id:
-                local_path = await self._tg.download_file(track.tg_file_id)
+                try:
+                    local_path = await self._tg.download_file(track.tg_file_id)
+                except FileTooBigError:
+                    # Over the Bot API's 20 MB getFile cap, so ID3 tags are out of
+                    # reach — but the message's own performer/title (and failing
+                    # that, the file name) are usually enough to find the track on
+                    # the target service. Degrade instead of failing the sync.
+                    logger.warning(
+                        "tg_download_too_big",
+                        track_id=track.id,
+                        direction=self.direction,
+                    )
 
             info = identify_track(
                 file_path=local_path,

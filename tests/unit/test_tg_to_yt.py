@@ -6,6 +6,7 @@ import pytest
 
 from navaar.db.repository import SyncLogRepository, TrackRepository
 from navaar.sync.tg_to_yt import TgToYtSync
+from navaar.telegram.client import FileTooBigError
 
 
 @pytest.fixture
@@ -121,3 +122,32 @@ async def test_process_pending_duplicate(
 
     updated = await track_repo.get_track(track.id)
     assert updated.status == "duplicate"
+
+
+@pytest.mark.asyncio
+async def test_process_pending_file_too_big_falls_back_to_metadata(
+    track_repo: TrackRepository,
+    sync_log_repo: SyncLogRepository,
+    mock_tg_client: MagicMock,
+    mock_yt_client: MagicMock,
+) -> None:
+    """A file over the Bot API's 20 MB getFile cap can never be downloaded, but the
+    message's own performer/title still identify it — the track must still sync."""
+    mock_tg_client.download_file = AsyncMock(side_effect=FileTooBigError("File is too big"))
+
+    track = await track_repo.create_track(
+        direction="tg_to_yt",
+        status="pending",
+        title="Shabe Meykhooneh",
+        artist="Hayedeh",
+        tg_file_id="file_big",
+    )
+
+    sync = TgToYtSync(track_repo, sync_log_repo, mock_tg_client, mock_yt_client)
+    await sync.process_pending()
+
+    updated = await track_repo.get_track(track.id)
+    assert updated.status == "synced"
+    assert updated.yt_video_id == "abc123"
+    # Identified without the bytes, so no local file to clean up.
+    mock_tg_client.cleanup.assert_not_called()
