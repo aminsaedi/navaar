@@ -95,7 +95,9 @@ class BasePushSync:
             track = await self._tracks.get_track(track.id)
 
         search_start = time.monotonic()
-        match = await asyncio.to_thread(self._target.find_best_match, track.artist, track.title)
+        match = await asyncio.to_thread(
+            self._target.find_best_match, track.artist, track.title, track.duration_seconds
+        )
         t.search_duration.observe(time.monotonic() - search_start)
 
         if not match:

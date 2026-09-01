@@ -245,6 +245,33 @@ Mode is selected automatically: if `client_secret` is provided and non-empty, us
 
 `identifier.py` runs three stages in order: ID3 tags (mutagen) → Telegram audio metadata → filename parsing. First success wins. The filename parser splits on `" - "` (dash/emdash/endash) and strips common suffixes like `(Official Video)`.
 
+ID3 needs the bytes, and the Bot API refuses `getFile` above 20 MB. `TelegramClient.download_file`
+raises `FileTooBigError` for that (and skips the retries, since it can never succeed); the push
+base class catches it and identifies from the Telegram metadata instead of failing the track.
+
+### Match Plausibility
+
+`matching.py` guards what `find_best_match` returns. Search always yields a confident top hit
+even for something that isn't on the service, and the clients used to take `results[0]`
+unconditionally — a 51-minute radio programme got matched to an unrelated 5-minute song and
+silently added to both playlists.
+
+A candidate is accepted when **either** signal holds, and rejected only when both fail:
+- **Title containment** (not similarity): correct YouTube matches routinely score low on
+  similarity because the uploader's title carries the artist and a Persian rendering
+  (`Moein - Parvardegara معین پروردگارا` for `Parvardegar`), so a similarity threshold would
+  discard good matches wholesale.
+- **Duration within 4x**: generous on purpose — a 26-minute live "Shabe Meykhooneh" against the
+  short studio cut is a *correct* match, carried by the title signal.
+
+When every candidate fails both, `find_best_match` returns `None` → an honest `no_yt_match` /
+`no_sp_match` rather than a wrong playlist entry. An unknown duration on either side passes
+(absence of evidence), so `yt_to_sp` — which stores no duration — is unchanged. YouTube search
+doesn't return durations, so a `videos.list` call enriches the hits (1 quota unit against the
+100 the search already spent) and is only made when a source duration exists; if it fails the
+guard degrades to the title signal alone. Thresholds were calibrated against, and validated to
+reject none of, the tracks already synced in production.
+
 ### Repository Pattern
 
 All three repositories take `async_sessionmaker` and create a new session per method call. No shared transactions. `TrackRepository` has convenience methods (`mark_synced`, `mark_failed`, `mark_duplicate`, `reset_for_retry`) that wrap `update_track()`. Key Spotify additions: `get_track_by_sp_track_id()` (uses `.limit(1)` because fan-out creates multiple tracks with same sp_track_id across directions) and `get_track_by_tg_file_id_and_direction()` for fan-out dedup.

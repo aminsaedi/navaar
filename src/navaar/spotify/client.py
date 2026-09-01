@@ -6,6 +6,7 @@ from spotipy.oauth2 import SpotifyOAuth, SpotifyPKCE
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from navaar.auth_errors import retry_if_transient
+from navaar.matching import is_plausible_match
 
 logger = structlog.get_logger()
 
@@ -108,16 +109,33 @@ class SpotifyClient:
             playlist_tracks = self.get_playlist_tracks()
         return any(t.get("id") == track_id for t in playlist_tracks)
 
-    def find_best_match(self, artist: str | None, title: str) -> dict | None:
+    def find_best_match(
+        self, artist: str | None, title: str, duration_seconds: int | None = None
+    ) -> dict | None:
         query = f"{artist} {title}" if artist else title
         results = self.search_track(query)
         if not results:
             return None
-        best = results[0]
+
+        for candidate in results:
+            ms = candidate.get("duration_ms")
+            if is_plausible_match(
+                title, duration_seconds, candidate.get("name"), round(ms / 1000) if ms else None
+            ):
+                logger.info(
+                    "sp_best_match",
+                    query=query,
+                    track_id=candidate.get("id"),
+                    match_name=candidate.get("name"),
+                )
+                return candidate
+
+        # Search always returns *something*; every hit being a different work means
+        # the track is not on Spotify, so report that instead of the top hit.
         logger.info(
-            "sp_best_match",
+            "sp_no_plausible_match",
             query=query,
-            track_id=best.get("id"),
-            match_name=best.get("name"),
+            duration_seconds=duration_seconds,
+            rejected=[(r.get("name"), r.get("duration_ms")) for r in results],
         )
-        return best
+        return None

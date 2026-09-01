@@ -10,6 +10,7 @@ import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from navaar.auth_errors import retry_if_transient
+from navaar.matching import is_plausible_match, parse_iso8601_duration
 from navaar.metrics import AUTH_ERRORS
 
 logger = structlog.get_logger()
@@ -103,7 +104,7 @@ class YTMusicClient:
         return {"Authorization": f"Bearer {self.get_access_token()}"}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
-    def search_song(self, query: str, limit: int = 5) -> list[dict]:
+    def search_song(self, query: str, limit: int = 5, with_duration: bool = False) -> list[dict]:
         resp = httpx.get(
             f"{YT_API_BASE}/search",
             headers=self._headers(),
@@ -125,8 +126,36 @@ class YTMusicClient:
             }
             for item in items
         ]
+        if with_duration and results:
+            durations = self._fetch_durations([r["videoId"] for r in results])
+            for r in results:
+                r["duration_seconds"] = durations.get(r["videoId"])
         logger.debug("yt_search", query=query, result_count=len(results))
         return results
+
+    def _fetch_durations(self, video_ids: list[str]) -> dict[str, int]:
+        """Durations for search hits, which `search` itself never returns.
+
+        Best-effort: a failure here must not fail the search, it only costs the
+        duration signal. One videos.list call is 1 quota unit against the 100 the
+        search already spent, so this is noise in the budget.
+        """
+        try:
+            resp = httpx.get(
+                f"{YT_API_BASE}/videos",
+                headers=self._headers(),
+                params={"part": "contentDetails", "id": ",".join(video_ids)},
+            )
+            resp.raise_for_status()
+            out: dict[str, int] = {}
+            for item in resp.json().get("items", []):
+                seconds = parse_iso8601_duration(item.get("contentDetails", {}).get("duration"))
+                if seconds:
+                    out[item["id"]] = seconds
+            return out
+        except Exception:
+            logger.warning("yt_duration_lookup_failed", count=len(video_ids), exc_info=True)
+            return {}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), retry=retry_if_transient)
     def get_playlist_tracks(self) -> list[dict]:
@@ -215,16 +244,34 @@ class YTMusicClient:
             playlist_tracks = self.get_playlist_tracks()
         return any(t.get("videoId") == video_id for t in playlist_tracks)
 
-    def find_best_match(self, artist: str | None, title: str) -> dict | None:
+    def find_best_match(
+        self, artist: str | None, title: str, duration_seconds: int | None = None
+    ) -> dict | None:
         query = f"{artist} {title}" if artist else title
-        results = self.search_song(query)
+        # Only pay for the duration lookup when there is a source duration to
+        # compare it against (yt→sp has none).
+        results = self.search_song(query, with_duration=duration_seconds is not None)
         if not results:
             return None
-        best = results[0]
+
+        for candidate in results:
+            if is_plausible_match(
+                title, duration_seconds, candidate.get("title"), candidate.get("duration_seconds")
+            ):
+                logger.info(
+                    "yt_best_match",
+                    query=query,
+                    video_id=candidate.get("videoId"),
+                    match_title=candidate.get("title"),
+                )
+                return candidate
+
+        # Every hit was a different work — search always returns *something*, so
+        # this is the "not on YouTube" case, not a reason to take the top hit.
         logger.info(
-            "yt_best_match",
+            "yt_no_plausible_match",
             query=query,
-            video_id=best.get("videoId"),
-            match_title=best.get("title"),
+            duration_seconds=duration_seconds,
+            rejected=[(r.get("title"), r.get("duration_seconds")) for r in results],
         )
-        return best
+        return None

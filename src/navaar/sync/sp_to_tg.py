@@ -42,10 +42,14 @@ class SpToTgSync(BasePullSync):
         # Spotify being active implies the full mesh, so fan-out to YT always runs.
         self._fanout = FanOut(track_repo, sp_enabled=True)
 
-    async def _youtube_video_id(self, artist: str | None, title: str, track_id: int) -> str:
+    async def _youtube_video_id(
+        self, artist: str | None, title: str, track_id: int, duration: int | None = None
+    ) -> str:
         """Spotify has no audio API, so find the same track on YouTube to download.
-        Marks the track failed and raises if there's no match."""
-        yt_match = await asyncio.to_thread(self._yt.find_best_match, artist, title)
+        Marks the track failed and raises if there's no match. The Spotify duration
+        is passed through so an unrelated upload of a very different length isn't
+        downloaded and posted to the channel as this track."""
+        yt_match = await asyncio.to_thread(self._yt.find_best_match, artist, title, duration)
         if not yt_match:
             await self._tracks.mark_failed(track_id, "no_yt_match_for_download")
             await self._log.log(
@@ -62,7 +66,9 @@ class SpToTgSync(BasePullSync):
         start = time.monotonic()
         logger.info("sp_to_tg_retrying", track_id=track.id, sp_track_id=track.sp_track_id)
         await self._tracks.update_track(track.id, status="syncing")
-        video_id = await self._youtube_video_id(track.artist, track.title, track.id)
+        video_id = await self._youtube_video_id(
+            track.artist, track.title, track.id, track.duration_seconds
+        )
         await self._download_and_upload(
             track_id=track.id,
             video_id=video_id,
@@ -104,7 +110,7 @@ class SpToTgSync(BasePullSync):
             sp_track_id=sp_track_id, title=name, artist=artist, duration=duration
         )
 
-        video_id = await self._youtube_video_id(artist, name, track.id)
+        video_id = await self._youtube_video_id(artist, name, track.id, duration)
         await self._tracks.update_track(track.id, status="syncing", yt_video_id=video_id)
         await self._download_and_upload(
             track_id=track.id,
