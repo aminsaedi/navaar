@@ -167,3 +167,34 @@ async def test_sync_state_json(sync_state_repo: SyncStateRepository) -> None:
     await sync_state_repo.set_json("snapshot", ["vid1", "vid2"])
     result = await sync_state_repo.get_json("snapshot")
     assert result == ["vid1", "vid2"]
+
+
+async def test_reset_stranded_requeues_mid_cycle_statuses(track_repo) -> None:
+    """A process that dies mid-cycle leaves rows in a status nothing queries for;
+    one such row sat in 'identifying' for six months while its sibling synced."""
+    stranded = []
+    for status in ("identifying", "searching", "syncing"):
+        t = await track_repo.create_track(
+            direction="tg_to_sp", status=status, title=f"T-{status}"
+        )
+        stranded.append(t.id)
+    keep = {}
+    for status in ("pending", "synced", "failed", "duplicate", "retry_scheduled"):
+        t = await track_repo.create_track(
+            direction="tg_to_yt", status=status, title=f"K-{status}"
+        )
+        keep[t.id] = status
+
+    count = await track_repo.reset_stranded()
+
+    assert count == 3
+    for tid in stranded:
+        assert (await track_repo.get_track(tid)).status == "pending"
+    # Terminal and already-queued statuses must be left exactly as they were.
+    for tid, status in keep.items():
+        assert (await track_repo.get_track(tid)).status == status
+
+
+async def test_reset_stranded_is_a_noop_when_nothing_stranded(track_repo) -> None:
+    await track_repo.create_track(direction="tg_to_yt", status="synced", title="ok")
+    assert await track_repo.reset_stranded() == 0

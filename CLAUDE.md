@@ -227,6 +227,11 @@ spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
   with a cooldown so a crash loop sends one alert (not one per cycle) plus a "recovered" message.
   All methods swallow their own exceptions. Configured via `NAVAAR_ALERT_*` (falls back to the first
   admin id when `alert_chat_id` is unset).
+- **Stranded tracks**: `identifying`/`searching`/`syncing` mean a cycle is actively working the
+  row, and nothing queries for them — so a process that dies mid-cycle strands the track forever
+  (one sat in `identifying` for six months while its sibling synced). `TrackRepository.reset_stranded()`
+  runs once at startup and requeues them to `pending`; safe there because Recreate + single writer
+  means no cycle can be in flight.
 - **Readiness**: `/healthz` is lenient (liveness only). `/readyz` returns 503 `degraded` when a
   direction's `last_{direction}_sync` is older than `interval * readiness_stale_multiplier`, so a
   silent crash-loop flips the pod NotReady instead of staying `1/1 Ready`.

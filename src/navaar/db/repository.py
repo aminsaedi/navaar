@@ -203,6 +203,26 @@ class TrackRepository:
             await session.commit()
             return result.rowcount  # type: ignore[return-value]
 
+    async def reset_stranded(self) -> int:
+        """Return tracks left in a mid-cycle status by a dead process to ``pending``.
+
+        ``identifying``/``searching``/``syncing`` are transient: something is
+        actively working the track. Nothing queries for them, so if the process
+        dies mid-cycle (deploy, OOM, node drain) the row is stranded forever —
+        one sat in ``identifying`` for six months while its sibling synced.
+
+        Safe at startup specifically: the deployment is Recreate with a single
+        writer, so no cycle can be in flight when this runs.
+        """
+        async with self._sf() as session:
+            result = await session.execute(
+                update(Track)
+                .where(Track.status.in_(["identifying", "searching", "syncing"]))
+                .values(status="pending")
+            )
+            await session.commit()
+            return result.rowcount  # type: ignore[return-value]
+
     async def get_counts(self) -> dict[str, dict[str, int]]:
         async with self._sf() as session:
             result = await session.execute(

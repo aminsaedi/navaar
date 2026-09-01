@@ -80,6 +80,12 @@ async def run() -> None:
     sync_state = SyncStateRepository(sf)
     sync_log = SyncLogRepository(sf)
 
+    # A previous process may have died mid-cycle, leaving tracks in a transient
+    # status that no query looks for. Requeue them before the loops start.
+    stranded = await track_repo.reset_stranded()
+    if stranded:
+        logger.info("stranded_tracks_requeued", count=stranded)
+
     # YT Music client
     yt_client = YTMusicClient(
         auth_file=settings.ytmusic_auth_file,
