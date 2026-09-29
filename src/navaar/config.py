@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     # Reply to each track in the channel with a live status card (origin, per-
     # platform sync status, links). Set False to disable the channel replies.
     track_cards_enabled: bool = True
+    # Listener vote: a track whose channel audio message (or status card) collects
+    # this many dislike reactions is removed from every platform and the channel,
+    # with an explanatory post. Channel reactions are anonymous (the Bot API only
+    # reports totals), so it's a plain head-count. 0 disables.
+    dislike_removal_threshold: int = 2
+    dislike_emojis: list[str] = Field(default_factory=lambda: ["\U0001f44e"])
 
     # Natural-language control: reply+@mention the bot in the channel (or DM it)
     # to manage Navaar in plain language. Backed by the Claude Agent SDK (in-pod

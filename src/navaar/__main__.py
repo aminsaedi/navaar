@@ -8,6 +8,7 @@ import time
 
 import structlog
 import uvicorn
+from telegram import Update
 
 from navaar.api.server import create_app
 from navaar.config import Settings
@@ -125,6 +126,8 @@ async def run() -> None:
         sync_state=sync_state,
         yt_client=yt_client,
         sp_client=sp_client,
+        dislike_threshold=settings.dislike_removal_threshold,
+        dislike_emojis=settings.dislike_emojis,
     )
     tg_app = bot_app_builder.build_app()
 
@@ -266,7 +269,11 @@ async def run() -> None:
     # Start all components
     await tg_app.initialize()
     await tg_app.start()
-    await tg_app.updater.start_polling(drop_pending_updates=True)
+    # ALL_TYPES: reaction updates (message_reaction_count, for the dislike vote)
+    # are opt-in \u2014 without listing them Telegram never sends them.
+    await tg_app.updater.start_polling(
+        drop_pending_updates=True, allowed_updates=Update.ALL_TYPES
+    )
     # Populate the Telegram `/` command menu (setMyCommands) for admins.
     await bot_app_builder.set_command_menu()
 

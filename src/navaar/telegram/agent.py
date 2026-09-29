@@ -85,6 +85,15 @@ the files to see exact API calls.
 - **delete** = remove from both playlists + delete the channel message(s) (`tg_message_id` and
   `card_message_id`) via the Bot API + delete the DB rows for the logical track.
 
+## Listener dislike vote (automatic removal)
+The bot itself (not you) removes a track when its channel audio message or status card
+collects `NAVAAR_DISLIKE_REMOVAL_THRESHOLD` (default 2) 👎 reactions: a full logical
+delete as above, then it posts "… was removed — Reason: it received N 👎 reactions" to
+the channel and writes a `track_removed_by_vote` row to `sync_logs` (details carry the
+title/artist/counts — use it to answer "what got voted off?"). Channel reactions are
+anonymous: nobody (you, the bot, the admin) can see *who* reacted, so there is no per-user
+veto. Removal isn't a ban — the same song can be posted/added again.
+
 ## Manually adding a track to a playlist (e.g. "add this song")
 **Never create a DB row manually when adding a track to a platform playlist.**
 The correct workflow is:

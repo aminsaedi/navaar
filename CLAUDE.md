@@ -157,6 +157,26 @@ YT/SP playlist, deletes the channel audio + status-card messages, and deletes ev
 row — matching the agent's documented "delete" semantics (it previously removed only one DB
 row while leaving the song live everywhere).
 
+### Listener Dislike Vote
+
+A track whose channel audio message **or** its status card collects
+`NAVAAR_DISLIKE_REMOVAL_THRESHOLD` (default 2; 0 disables) reactions from
+`NAVAAR_DISLIKE_EMOJIS` (default 👎) is removed everywhere via `_purge` (the same full
+logical delete as `/delete`), then the bot posts a "… was removed — Reason: …" message to the
+channel and logs `track_removed_by_vote`. Not a blocklist: the song can be added again.
+
+- **No actor, no veto.** Channel reactions are anonymous — the Bot API only delivers
+  `message_reaction_count` (totals per message), never who reacted. So it's a head-count; a
+  per-user veto is impossible. The two messages are judged independently (not summed) so one
+  listener reacting to both isn't double-counted.
+- **Opt-in update type**: reaction updates are only sent when listed in `allowed_updates`, so
+  `start_polling` passes `Update.ALL_TYPES`. The bot must be a channel admin (it is).
+- `_vote_lock` serializes removals (audio + card updates can both cross the threshold).
+- **Mid-flight purges** (vote or `/delete` while a sync is working the row): `BasePushSync`
+  checks `mark_synced(...)` — `None` means the row vanished, so it removes the entry it just
+  added (otherwise the song lingers on the target and the opposite pull loop re-imports it);
+  `BasePullSync` likewise deletes an upload whose row was purged during download/upload.
+
 ### Conversational Control
 
 `NavaarAgent` (`telegram/agent.py`) lets you manage Navaar in natural language: reply to a

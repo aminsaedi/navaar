@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 
 import structlog
@@ -174,7 +175,13 @@ class BasePullSync:
                     caption=caption,
                 )
                 TG_UPLOAD_TOTAL.labels(result="success").inc()
-                await self._tracks.mark_synced(track_id, tg_message_id=message_id)
+                if await self._tracks.mark_synced(track_id, tg_message_id=message_id) is None:
+                    # Purged (/delete) while downloading/uploading: the purge couldn't
+                    # see this message yet, so take it down rather than orphan it.
+                    logger.info(f"{self.direction}_purged_midflight", track_id=track_id)
+                    with contextlib.suppress(Exception):
+                        await self._tg.delete_message(message_id)
+                    return message_id
                 await self._log.log(
                     "track_synced",
                     track_id=track_id,

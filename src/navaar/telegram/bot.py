@@ -14,6 +14,7 @@ from telegram import (
     BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    ReactionTypeEmoji,
     Update,
 )
 from telegram.constants import ChatAction
@@ -23,6 +24,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
     filters,
 )
 
@@ -106,6 +108,8 @@ class NavaarBot:
         sync_engine: SyncEngine | None = None,
         yt_client: YTMusicClient | None = None,
         sp_client: SpotifyClient | None = None,
+        dislike_threshold: int = 0,
+        dislike_emojis: list[str] | None = None,
     ) -> None:
         self._token = token
         self._channel_id = channel_id
@@ -123,6 +127,13 @@ class NavaarBot:
         self._bot_username: str | None = None
         self._app: Application | None = None
         self._start_time = time.time()
+        # Listener vote: a track whose channel message collects `dislike_threshold`
+        # of these reactions is removed everywhere. 0 disables.
+        self._dislike_threshold = dislike_threshold
+        self._dislike_emojis = set(dislike_emojis or ["\U0001f44e"])
+        # Serializes vote removals: the audio message and its status card each
+        # emit their own count update, and both can cross the threshold.
+        self._vote_lock = asyncio.Lock()
 
     def set_sync_engine(self, engine: SyncEngine) -> None:
         self._engine = engine
@@ -423,7 +434,7 @@ class NavaarBot:
             "/retry all \u2014 Retry all failed tracks\n"
             "/retry tg \u2014 Retry all failed TG\u2192YT\n"
             "/retry yt \u2014 Retry all failed YT\u2192TG\n"
-            "/delete &lt;id&gt; \u2014 Remove a track from DB\n"
+            "/delete &lt;id&gt; \u2014 Remove a track everywhere\n"
             "\n"
             "<b>Assistant</b>\n"
             "/context \u2014 Conversation context usage\n"
@@ -1081,15 +1092,34 @@ class NavaarBot:
         await self._reply(update, summary)
 
     async def _purge_logical_track(self, track_id: int) -> str:
+        """Fully remove a *logical* track and return an HTML summary (see _purge)."""
+        result = await self._purge(track_id)
+        if result is None:
+            return f"\u274c Track #{track_id} not found."
+        track = result["track"]
+        artist = html.escape(track.artist or "Unknown")
+        title = html.escape(track.title or "")
+        parts = [f"\U0001f5d1 Deleted <b>{artist} \u2014 {title}</b> (#{track_id})"]
+        detail = []
+        if result["removed"]:
+            detail.append("removed from " + "+".join(result["removed"]))
+        if result["deleted_msgs"]:
+            detail.append(f"{result['deleted_msgs']} channel message(s) deleted")
+        detail.append(f"{result['rows']} DB row(s) removed")
+        parts.append("\u2022 " + "; ".join(detail))
+        return "\n".join(parts)
+
+    async def _purge(self, track_id: int) -> dict | None:
         """Fully remove a *logical* track: take it off both playlists, delete its
         channel audio message(s) and status card, and delete every sibling DB row \u2014
         matching the documented 'delete' semantics. Previously /delete removed only a
         single DB row, leaving the song live on both playlists and in the channel
         while replying 'deleted' (a false success). Each external step is best-effort
-        so one failure can't block the rest; returns an HTML summary of what happened."""
+        so one failure can't block the rest. Returns None when the track doesn't
+        exist, else {track, removed: sorted service codes, deleted_msgs, rows}."""
         track = await self._tracks.get_track(track_id)
         if not track:
-            return f"\u274c Track #{track_id} not found."
+            return None
         siblings = await self._tracks.get_sibling_tracks(track)
 
         yt_ids = {s.yt_video_id for s in siblings if s.yt_video_id}
@@ -1101,13 +1131,13 @@ class NavaarBot:
             if m
         }
 
-        removed: list[str] = []
+        removed: set[str] = set()
         for vid in yt_ids:
             if self._yt is not None and await self._safe_remove(self._yt, vid, "yt"):
-                removed.append("YT")
+                removed.add("YT")
         for sid in sp_ids:
             if self._sp is not None and await self._safe_remove(self._sp, sid, "sp"):
-                removed.append("SP")
+                removed.add("SP")
 
         deleted_msgs = 0
         for mid in msg_ids:
@@ -1115,18 +1145,96 @@ class NavaarBot:
                 deleted_msgs += 1
 
         rows = await self._tracks.delete_tracks([s.id for s in siblings])
+        return {
+            "track": track,
+            "removed": sorted(removed),
+            "deleted_msgs": deleted_msgs,
+            "rows": rows,
+        }
 
+    # ── Listener vote: remove a track on enough dislike reactions ────
+
+    def _dislike_count(self, reactions) -> int:
+        return sum(
+            r.total_count
+            for r in reactions or ()
+            if isinstance(r.type, ReactionTypeEmoji) and r.type.emoji in self._dislike_emojis
+        )
+
+    async def _handle_reaction_count(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Channel reactions are anonymous: the Bot API only delivers per-message
+        totals (`message_reaction_count`), never who reacted \u2014 so the rule is a plain
+        head-count on either the track's audio message or its status card (each is
+        judged on its own, so one listener reacting to both isn't counted twice).
+        Removal is a full logical delete; nothing is blocked, so the same song can
+        be posted/added again later."""
+        upd = update.message_reaction_count
+        if upd is None or self._dislike_threshold <= 0:
+            return
+        if upd.chat.id != self._channel_id:
+            return
+        count = self._dislike_count(upd.reactions)
+        if count < self._dislike_threshold:
+            return
+
+        async with self._vote_lock:
+            # Re-resolve under the lock: a concurrent update (the card vs the audio
+            # message) may already have removed it.
+            track = await self._tracks.get_logical_track_by_message_id(upd.message_id)
+            if track is None:
+                return
+            logger.info(
+                "track_vote_removal",
+                track_id=track.id,
+                message_id=upd.message_id,
+                dislikes=count,
+            )
+            result = await self._purge(track.id)
+            if result is None:
+                return
+            await self._log.log(
+                "track_removed_by_vote",
+                track_id=track.id,
+                direction=track.direction,
+                details={
+                    "message_id": upd.message_id,
+                    "dislikes": count,
+                    "removed_from": result["removed"],
+                    "title": track.title,
+                    "artist": track.artist,
+                },
+            )
+            await self._announce_vote_removal(result, count)
+
+    async def _announce_vote_removal(self, result: dict, count: int) -> None:
+        track = result["track"]
         artist = html.escape(track.artist or "Unknown")
-        title = html.escape(track.title or "")
-        parts = [f"\U0001f5d1 Deleted <b>{artist} \u2014 {title}</b> (#{track_id})"]
-        detail = []
-        if removed:
-            detail.append("removed from " + "+".join(sorted(set(removed))))
-        if deleted_msgs:
-            detail.append(f"{deleted_msgs} channel message(s) deleted")
-        detail.append(f"{rows} DB row(s) removed")
-        parts.append("\u2022 " + "; ".join(detail))
-        return "\n".join(parts)
+        title = html.escape(track.title or "Unknown")
+        where = [SVC_LABEL[s.lower()] for s in result["removed"]]
+        if result["deleted_msgs"]:
+            where.append("this channel")
+        emojis = "".join(sorted(self._dislike_emojis))
+        text = (
+            f"\U0001f5d1 <b>{artist} \u2014 {title}</b> was removed\n"
+            f"Reason: it received {count} {emojis} reactions "
+            f"(the limit is {self._dislike_threshold})."
+        )
+        if where:
+            text += "\nRemoved from: " + ", ".join(where) + "."
+        text += "\n<i>Not banned \u2014 it can be added again anytime.</i>"
+        if self._app is None:
+            return
+        try:
+            await self._app.bot.send_message(
+                chat_id=self._channel_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logger.warning("vote_announcement_failed", track_id=track.id, exc_info=True)
 
     async def _safe_remove(self, client: object, ext_id: str, svc: str) -> bool:
         """Remove one external id from a playlist off the event loop; swallow errors.
@@ -1346,7 +1454,7 @@ class NavaarBot:
             BotCommand("logs", "Recent sync log entries: /logs [n]"),
             BotCommand("sync", "Force sync: /sync [tg|yt|sp|all]"),
             BotCommand("retry", "Retry failed: /retry <id|all|tg|yt|sp>"),
-            BotCommand("delete", "Remove a track from the DB: /delete <id>"),
+            BotCommand("delete", "Remove a track everywhere: /delete <id>"),
             BotCommand("failed", "List failed tracks: /failed [tg|yt|sp]"),
             BotCommand("search", "Search YouTube Music: /search <query>"),
         ]
@@ -1412,6 +1520,15 @@ class NavaarBot:
         self._app.add_handler(
             MessageHandler(
                 filters.TEXT & filters.UpdateType.CHANNEL_POST, self._handle_channel_command
+            )
+        )
+
+        # Listener vote: anonymous reaction totals on channel messages.
+        self._app.add_handler(
+            MessageReactionHandler(
+                self._handle_reaction_count,
+                chat_id=self._channel_id,
+                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_COUNT_UPDATED,
             )
         )
 

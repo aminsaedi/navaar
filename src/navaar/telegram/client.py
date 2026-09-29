@@ -91,6 +91,9 @@ class TelegramClient:
         )
         return message.message_id
 
+    async def delete_message(self, message_id: int) -> None:
+        await self._bot.delete_message(chat_id=self._channel_id, message_id=message_id)
+
     def cleanup(self, file_path: str) -> None:
         try:
             Path(file_path).unlink(missing_ok=True)

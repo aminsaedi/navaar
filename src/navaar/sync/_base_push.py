@@ -93,6 +93,8 @@ class BasePushSync:
         else:
             await self._tracks.update_track(track.id, status="searching")
             track = await self._tracks.get_track(track.id)
+        if track is None:
+            return  # purged while identifying
 
         search_start = time.monotonic()
         match = await asyncio.to_thread(
@@ -135,7 +137,14 @@ class BasePushSync:
         await self._tracks.update_track(track.id, status="syncing", **{t.db_field: ext_id})
         await asyncio.to_thread(self._target.add_to_playlist, ext_id)
 
-        await self._tracks.mark_synced(track.id, **{t.db_field: ext_id})
+        if await self._tracks.mark_synced(track.id, **{t.db_field: ext_id}) is None:
+            # The row was purged mid-flight (/delete or a dislike vote ran while we
+            # were searching/adding). The purge couldn't see this entry yet, so undo
+            # it \u2014 otherwise the song lingers on the target and the opposite pull
+            # direction re-imports it into the channel.
+            logger.info(f"{self.direction}_purged_midflight", track_id=track.id)
+            await asyncio.to_thread(self._target.remove_from_playlist, ext_id)
+            return
         await self._log.log(
             "track_synced",
             track_id=track.id,
@@ -192,4 +201,4 @@ class BasePushSync:
             if local_path:
                 self._tg.cleanup(local_path)
 
-        return await self._tracks.get_track(track.id)
+        return await self._tracks.get_track(track.id)  # None if purged meanwhile
