@@ -5,6 +5,7 @@ from pathlib import Path
 
 import structlog
 from telegram import Bot
+from telegram.error import NetworkError, TimedOut
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from navaar.metrics import TG_DOWNLOAD_TOTAL
@@ -24,6 +25,22 @@ class FileTooBigError(Exception):
 def _is_file_too_big(exc: BaseException) -> bool:
     # python-telegram-bot surfaces this as BadRequest("File is too big").
     return "file is too big" in str(exc).lower()
+
+
+def _is_connect_error(exc: BaseException) -> bool:
+    """True for errors that mean the connection was never established.
+
+    A ConnectError guarantees the upload never started, so it is safe to retry
+    without risk of posting a duplicate. TimedOut is explicitly excluded: a
+    write/read timeout can fire after Telegram has already accepted the file,
+    so retrying would create a duplicate in the channel.
+    """
+    if isinstance(exc, TimedOut):
+        return False
+    if isinstance(exc, NetworkError):
+        msg = str(exc).lower()
+        return any(k in msg for k in ("connect", "connection refused", "connection reset"))
+    return False
 
 
 # Retry transient network faults, but never the 20 MB cap — it is a property of
@@ -69,20 +86,37 @@ class TelegramClient:
         duration: int | None = None,
         caption: str | None = None,
     ) -> int:
-        """Send audio to channel. No retry — a timeout likely means the upload
-        already went through, and retrying would create duplicates."""
+        """Send audio to channel.
+
+        ConnectErrors (connection never established) are retried up to 3 times —
+        they are safe because the upload provably never started. TimedOut is NOT
+        retried: a write/read timeout can fire after Telegram accepted the bytes,
+        so a retry would post a duplicate in the channel.
+        """
         with open(file_path, "rb") as f:
-            message = await self._bot.send_audio(
-                chat_id=self._channel_id,
-                audio=f,
-                title=title,
-                performer=performer,
-                duration=duration,
-                caption=caption,
-                read_timeout=300,
-                write_timeout=300,
-                connect_timeout=30,
-            )
+            for attempt in range(3):
+                try:
+                    message = await self._bot.send_audio(
+                        chat_id=self._channel_id,
+                        audio=f,
+                        title=title,
+                        performer=performer,
+                        duration=duration,
+                        caption=caption,
+                        read_timeout=300,
+                        write_timeout=300,
+                        connect_timeout=30,
+                    )
+                    break
+                except Exception as exc:
+                    if _is_connect_error(exc) and attempt < 2:
+                        logger.warning(
+                            "tg_send_audio_connect_retry",
+                            attempt=attempt + 1,
+                            error=str(exc),
+                        )
+                        continue
+                    raise
         logger.info(
             "tg_audio_sent",
             message_id=message.message_id,
