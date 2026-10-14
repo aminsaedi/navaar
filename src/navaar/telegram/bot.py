@@ -253,16 +253,19 @@ class NavaarBot:
     async def _handle_channel_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """A text post in the channel that @-mentions the bot → natural-language
+        """A text or photo post in the channel that @-mentions the bot → natural-language
         action. If it replies to a track's audio message or status card, that track
         is the context ("this"/"it"); otherwise it's a channel-wide request (e.g.
-        "list duplicates"). Posting rights to the channel are the gate."""
+        "list duplicates"). Posting rights to the channel are the gate. A photo
+        post's text lives in `caption`, not `text`, so both are considered; the
+        image is downloaded and its path handed to the agent so it can see it."""
         if self._agent is None or not getattr(self._agent, "enabled", False):
             return
         message = update.channel_post
-        if not message or not message.text or message.chat_id != self._channel_id:
+        if not message or message.chat_id != self._channel_id:
             return
-        if not self._bot_username or f"@{self._bot_username}".lower() not in message.text.lower():
+        text = message.text or message.caption or ""
+        if not text or not self._bot_username or f"@{self._bot_username}".lower() not in text.lower():
             return
 
         siblings = None
@@ -272,11 +275,17 @@ class NavaarBot:
             )
             if track:
                 siblings = await self._tracks.get_sibling_tracks(track)
-        text = self._strip_mention(message.text)
+        text = self._strip_mention(text)
         ctrl = self._control_command(text)
         if ctrl is not None:
             await message.reply_text(await ctrl(), disable_web_page_preview=True)
             return
+
+        # A photo attached to the post: download it and tell the agent where the
+        # file lives so it can Read/view the image with its vision tool.
+        if message.photo:
+            dest = await self._download_photo(message, context)
+            text = f"[image saved at {dest}]\n{text}".strip()
 
         # Feedback in the channel: Telegram does NOT render typing indicators in
         # channels, so post an editable placeholder and swap in the real answer when
@@ -320,20 +329,24 @@ class NavaarBot:
         elif message.photo:
             await self._handle_dm_photo(message, context)
 
+    async def _download_photo(self, message, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """Download the largest photo on `message` to /tmp and return its path.
+
+        Telegram sends several sizes; the last item is the largest."""
+        import os
+        photo = message.photo[-1]
+        tg_file = await context.bot.get_file(photo.file_id)
+        os.makedirs("/tmp/navaar_photos", exist_ok=True)
+        dest = f"/tmp/navaar_photos/{photo.file_unique_id}.jpg"
+        await tg_file.download_to_drive(dest)
+        return dest
+
     async def _handle_dm_photo(
         self, message, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Download the photo the admin sent, save to /tmp, then invoke the agent
         with a prompt that includes the file path so it can Read/view it."""
-        import os
-        # Telegram sends multiple sizes; pick the largest (last item).
-        photo = message.photo[-1]
-        tg_file = await context.bot.get_file(photo.file_id)
-
-        os.makedirs("/tmp/navaar_photos", exist_ok=True)
-        dest = f"/tmp/navaar_photos/{photo.file_unique_id}.jpg"
-        await tg_file.download_to_drive(dest)
-
+        dest = await self._download_photo(message, context)
         caption = message.caption or ""
         # Build a prompt that tells the agent where the image lives so it can
         # Read it with its vision tool.
@@ -1543,6 +1556,14 @@ class NavaarBot:
         self._app.add_handler(
             MessageHandler(
                 filters.TEXT & filters.UpdateType.CHANNEL_POST, self._handle_channel_command
+            )
+        )
+
+        # Photo post in the channel that @-mentions the bot — same agent path,
+        # image downloaded first so the agent can see it.
+        self._app.add_handler(
+            MessageHandler(
+                filters.PHOTO & filters.UpdateType.CHANNEL_POST, self._handle_channel_command
             )
         )
 

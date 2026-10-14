@@ -79,9 +79,18 @@ async def test_set_command_menu_noop_without_app() -> None:
     await bot.set_command_menu()  # must not raise
 
 
-def _channel_msg(text: str, *, reply_to: int | None = None) -> MagicMock:
+def _channel_msg(
+    text: str | None,
+    *,
+    reply_to: int | None = None,
+    photo: bool = False,
+    caption: str | None = None,
+) -> MagicMock:
     msg = MagicMock()
     msg.text = text
+    msg.caption = caption
+    # A real text post has no photo; a photo post carries a list of sizes.
+    msg.photo = [MagicMock(file_id="fid", file_unique_id="uid")] if photo else None
     msg.chat_id = -100
     msg.reply_to_message = MagicMock(message_id=reply_to) if reply_to else None
     msg.reply_text = AsyncMock()
@@ -113,6 +122,25 @@ async def test_channel_mention_reply_passes_track_context() -> None:
     msg = _channel_msg("@navbot unsync this", reply_to=42)
     await bot._handle_channel_command(MagicMock(channel_post=msg), MagicMock())
     assert bot._agent.run.await_args.kwargs["siblings"] == ["sib"]
+
+
+@pytest.mark.asyncio
+async def test_channel_photo_mention_downloads_image_for_agent() -> None:
+    # A photo post's mention lives in caption, not text; the image must be
+    # downloaded and its path handed to the agent so it can actually see it.
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(return_value="ok"))
+    msg = _channel_msg(None, photo=True, caption="@navbot what track is this?")
+    context = MagicMock()
+    context.bot.get_file = AsyncMock(
+        return_value=MagicMock(download_to_drive=AsyncMock())
+    )
+    await bot._handle_channel_command(MagicMock(channel_post=msg), context)
+    bot._agent.run.assert_awaited_once()
+    prompt = bot._agent.run.await_args.kwargs["message_text"]
+    assert "[image saved at /tmp/navaar_photos/uid.jpg]" in prompt
+    assert "what track is this?" in prompt
 
 
 @pytest.mark.asyncio
