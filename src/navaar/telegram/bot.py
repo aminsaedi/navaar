@@ -313,9 +313,32 @@ class NavaarBot:
         if not self._is_admin(update):
             return
         message = update.message
-        if not message or not message.text:
+        if not message:
             return
-        await self._run_agent_with_feedback(message, context, message.text, siblings=None)
+        if message.text:
+            await self._run_agent_with_feedback(message, context, message.text, siblings=None)
+        elif message.photo:
+            await self._handle_dm_photo(message, context)
+
+    async def _handle_dm_photo(
+        self, message, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Download the photo the admin sent, save to /tmp, then invoke the agent
+        with a prompt that includes the file path so it can Read/view it."""
+        import os
+        # Telegram sends multiple sizes; pick the largest (last item).
+        photo = message.photo[-1]
+        tg_file = await context.bot.get_file(photo.file_id)
+
+        os.makedirs("/tmp/navaar_photos", exist_ok=True)
+        dest = f"/tmp/navaar_photos/{photo.file_unique_id}.jpg"
+        await tg_file.download_to_drive(dest)
+
+        caption = message.caption or ""
+        # Build a prompt that tells the agent where the image lives so it can
+        # Read it with its vision tool.
+        prompt = f"[image saved at {dest}]\n{caption}".strip()
+        await self._run_agent_with_feedback(message, context, prompt, siblings=None)
 
     async def _run_agent_with_feedback(
         self, message, context: ContextTypes.DEFAULT_TYPE, text: str, *, siblings
@@ -1571,6 +1594,13 @@ class NavaarBot:
         self._app.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+                self._handle_dm_message,
+            )
+        )
+        # Photo messages from admins — same agent pipeline, image downloaded first.
+        self._app.add_handler(
+            MessageHandler(
+                filters.PHOTO & filters.ChatType.PRIVATE,
                 self._handle_dm_message,
             )
         )
