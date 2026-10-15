@@ -3,6 +3,7 @@
 #
 #   navaar-usb-sync attach   udev: stick just plugged in  -> always sync + notify
 #   navaar-usb-sync change   library changed              -> debounce, sync if stick present
+#                                                            (+ ask Music Assistant to rescan)
 #   navaar-usb-sync timer    every 10 min                 -> sync only if library changed
 #
 # The stick is mounted only for the copy and unmounted right after, so pulling it
@@ -19,6 +20,7 @@ MNT=/run/navaar-usb/mnt
 STATE=/var/lib/navaar-usb
 ATTEMPTS=5
 NOTIFY_ENV=/etc/navaar-usb/notify.env
+MA_ENV=/etc/navaar-usb/ma.env  # MA_URL, MA_TOKEN, MA_PROVIDER (optional)
 
 log() { echo "[$TRIGGER] $*"; }
 
@@ -41,6 +43,25 @@ lib_summary() {
     n=$(find "$LIB" -maxdepth 1 -type f -name '*.mp3' | wc -l)
     mb=$(du -sm --exclude=.navaar-tmp "$LIB" | cut -f1)
     echo "$n songs, ${mb} MB"
+}
+
+# Music Assistant (mx) reads the library over NFS but has no file watcher: ask it
+# to rescan the Navaar provider whenever the library changed since the last ask.
+ma_rescan() {
+    [ -r "$MA_ENV" ] || return 0
+    # shellcheck disable=SC1090
+    . "$MA_ENV"
+    local h
+    h=$(lib_hash)
+    [ "$(cat "$STATE/ma.hash" 2>/dev/null)" = "$h" ] && return 0
+    if curl -sf -m 20 -o /dev/null -X POST "$MA_URL/api" \
+        -H "Authorization: Bearer $MA_TOKEN" -H "Content-Type: application/json" \
+        -d "{\"command\": \"music/sync\", \"args\": {\"providers\": [\"$MA_PROVIDER\"]}}"; then
+        echo "$h" > "$STATE/ma.hash"
+        log "asked Music Assistant to rescan $MA_PROVIDER"
+    else
+        log "Music Assistant rescan request failed (retried on the next trigger)"
+    fi
 }
 
 cleanup_mount() {
@@ -98,6 +119,8 @@ if [ "$TRIGGER" = change ]; then
     sleep 30  # let a burst of library updates settle into one copy
 fi
 
+ma_rescan
+
 if [ ! -b "$DEV" ]; then
     log "no USB stick labelled $LABEL attached"
     exit 0
@@ -131,7 +154,9 @@ while :; do
     fi
     echo "$want" > "$STATE/$UUID.hash"
     log "synced: $(lib_summary) (+$COPIED copied, -$DELETED deleted)"
-    if [ "$TRIGGER" = attach ] || [ "$COPIED" -gt 0 ] || [ "$DELETED" -gt 0 ]; then
+    # Message only when someone is waiting on it (just plugged the stick in);
+    # background top-ups while it sits plugged in stay silent.
+    if [ "$TRIGGER" = attach ] || [ "$TRIGGER" = manual ]; then
         notify "✅ Navaar USB stick synced — $(lib_summary) (+$COPIED new, -$DELETED removed). Safe to unplug."
     fi
     # The library may have changed while we were copying: loop until stable.

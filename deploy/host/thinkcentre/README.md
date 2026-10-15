@@ -26,7 +26,8 @@ Any FAT32 stick **labelled `NAVAAR`** gets the library copied to `<stick>/navaar
   out of a car mid-write) is repaired with `fsck.vfat -a` first.
 - Each copy is retried 5× with backoff while the stick stays attached; a full stick
   fails fast. With `/etc/navaar-usb/notify.env` (`BOT_TOKEN=`, `CHAT_ID=`) you get a
-  Telegram message when it is done ("safe to unplug") or failed.
+  Telegram message when a just-plugged stick is done ("safe to unplug") or a copy
+  failed; background top-ups are silent.
 
 Preparing a new stick (destroys its contents — check the device name!):
 
@@ -38,6 +39,10 @@ sudo mkfs.vfat -F 32 -n NAVAAR /dev/sdX1
 
 MBR + FAT32 is what car head units read most reliably (many reject GPT or exFAT);
 files are MP3 with ID3v2.3 tags and a ≤500 px baseline JPEG cover for the same reason.
+
+**Music Assistant rescan**: MA has no file watcher, so the same script also asks MA
+(`/etc/navaar-usb/ma.env`: `MA_URL`, `MA_TOKEN`, `MA_PROVIDER`) to rescan the Navaar
+provider whenever the library changed — new songs appear in MA within ~1 minute.
 
 Operate:
 
