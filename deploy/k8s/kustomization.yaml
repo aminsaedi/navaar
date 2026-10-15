@@ -22,4 +22,4 @@ resources:
 # a YAML number, which kustomize rejects for the string-typed newTag field.
 images:
   - name: ghcr.io/aminsaedi/navaar
-    newTag: "5b442b4"
+    newTag: "a505c05"
