@@ -191,6 +191,27 @@ async def run() -> None:
     for module in sync_modules.values():
         module.set_card_service(card_service)
 
+    # Local music library (USB stick / Navidrome / Music Assistant). Added after the
+    # card-service injection above: it has no channel presence of its own.
+    library_sync = None
+    if settings.library_dir:
+        from navaar.library.sync import LibrarySync
+
+        library_sync = LibrarySync(
+            track_repo, sync_state, tg_client,
+            # Own downloader: library copies keep full quality (the shared one
+            # re-encodes anything over the 50 MB Telegram upload cap).
+            YTDownloader(cookies_file=settings.ytdlp_cookies_file, max_upload_mb=4096),
+            settings.library_dir,
+            bitrate_kbps=settings.library_bitrate_kbps,
+            max_per_cycle=settings.library_max_per_cycle,
+            playlist_name=settings.library_playlist_name,
+        )
+        sync_modules["library"] = library_sync
+        intervals["library"] = settings.sync_interval_library
+        bot_app_builder.set_library(library_sync)
+        logger.info("library_enabled", dir=settings.library_dir)
+
     # Alert notifier: push systemic sync failures to Telegram. Falls back to the
     # first admin DM when no dedicated alert chat is configured.
     from navaar.telegram.alerts import AlertNotifier

@@ -1,0 +1,147 @@
+# Navidrome: streams the Navaar music library (the same /home/amin/music/navaar
+# folder navaar's library loop maintains) at https://music.aminsaedi.com.
+#
+# Exposure: Path C (public-edge on toronto, no CDN) — audio streaming wants HTTP
+# Range requests, no 100 MB body cap, and shouldn't ride Cloudflare's free CDN.
+# Defaults from the edge: TLS, HTTP->HTTPS, per-IP rate limit, security headers.
+# Navidrome itself rate-limits logins (ND_AUTHREQUESTLIMIT). The admin login is in
+# the in-cluster Secret `navidrome-admin` (not in git).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: navidrome-data
+  namespace: navaar
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Retain: the DB holds users, playlists, play counts and stars.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: navidrome
+  namespace: navaar
+  labels:
+    app: navidrome
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # SQLite on a RWO volume
+  selector:
+    matchLabels:
+      app: navidrome
+  template:
+    metadata:
+      labels:
+        app: navidrome
+    spec:
+      # The music lives on this node's disk (hostPath below).
+      nodeSelector:
+        kubernetes.io/hostname: thinkcentre
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: navidrome
+          image: deluan/navidrome:0.64.2
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+          ports:
+            - containerPort: 4533
+              name: http
+          env:
+            - name: ND_MUSICFOLDER
+              value: /music
+            - name: ND_DATAFOLDER
+              value: /data
+            - name: ND_LOGLEVEL
+              value: info
+            # Files appear via navaar's atomic renames; the watcher picks them up
+            # within seconds. The schedule is a safety net.
+            - name: ND_SCANNER_SCHEDULE
+              value: "@every 6h"
+            - name: ND_SCANNER_WATCHERWAIT
+              value: 15s
+            # Navaar.m3u8 in the library becomes a shared "Navaar" playlist.
+            - name: ND_AUTOIMPORTPLAYLISTS
+              value: "true"
+            - name: ND_DEFAULTPLAYLISTPUBLICVISIBILITY
+              value: "true"
+            - name: ND_ENABLESHARING
+              value: "true"
+            - name: ND_ENABLEINSIGHTSCOLLECTOR
+              value: "false"
+            - name: ND_DEFAULTTHEME
+              value: Spotify-ish
+          volumeMounts:
+            - name: music
+              mountPath: /music
+              readOnly: true
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: music
+          hostPath:
+            path: /home/amin/music/navaar
+            type: Directory
+        - name: data
+          persistentVolumeClaim:
+            claimName: navidrome-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: navidrome
+  namespace: navaar
+spec:
+  selector:
+    app: navidrome
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: navidrome
+  namespace: navaar
+spec:
+  ingressClassName: public-edge  # Path C: the opt-in to the public internet
+  rules:
+    - host: music.aminsaedi.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: navidrome
+                port:
+                  number: 80

@@ -169,6 +169,22 @@ SP_SEARCH_DURATION = Histogram(
 )
 
 
+# ── Local music library (USB / Navidrome / Music Assistant source) ───
+
+LIBRARY_TRACKS_GAUGE = Gauge(
+    "navaar_library_tracks",
+    "Songs present as MP3 files in the local music library",
+)
+LIBRARY_FAILED_GAUGE = Gauge(
+    "navaar_library_failed_tracks",
+    "Channel songs whose library file could not be built yet (retrying with backoff)",
+)
+LIBRARY_BYTES_GAUGE = Gauge(
+    "navaar_library_bytes",
+    "Total size of the local music library in bytes",
+)
+
+
 # ── Initialization ───────────────────────────────────────────────────
 
 def init_metrics(

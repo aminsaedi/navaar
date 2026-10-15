@@ -23,6 +23,10 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      # The library tests run real ffmpeg (tags, cover art, encode vs stream-copy).
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
       - name: Install dependencies
         run: uv sync --dev --frozen
 

@@ -60,6 +60,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            # The local music library (NAVAAR_LIBRARY_DIR). Host side of the mirror:
+            # Navidrome serves it, Music Assistant mounts it over NFS, and udev/systemd
+            # on thinkcentre copy it onto the car USB stick (deploy/host/thinkcentre).
+            - name: library
+              mountPath: /library
           livenessProbe:
             httpGet:
               path: /healthz
@@ -85,3 +90,11 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: navaar-data
+        # Plain directory on the node the pod is pinned to (nodeSelector above).
+        # type Directory, not DirectoryOrCreate: the host creates it owned by uid
+        # 1000 with an SELinux container_file_t label; a kubelet-created dir would
+        # be root-owned and unwritable for the pod.
+        - name: library
+          hostPath:
+            path: /home/amin/music/navaar
+            type: Directory

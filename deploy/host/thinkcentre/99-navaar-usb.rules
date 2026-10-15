@@ -1,0 +1,7 @@
+# Navaar car USB stick: any filesystem labelled NAVAAR receives the Navaar music
+# library (/home/amin/music/navaar -> <stick>/navaar) as soon as it is plugged in.
+#
+# Keep the desktop (udisks) from auto-mounting it: navaar-usb-sync mounts the stick
+# only while copying, so it is safe to pull out at any other time.
+SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="NAVAAR", ENV{UDISKS_IGNORE}="1"
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="NAVAAR", TAG+="systemd", ENV{SYSTEMD_WANTS}+="navaar-usb-sync@attach.service"

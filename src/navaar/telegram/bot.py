@@ -124,6 +124,7 @@ class NavaarBot:
         self._fanout = FanOut(track_repo, sp_enabled=self._sp_enabled)
         self._card = None
         self._agent = None
+        self._library = None
         self._bot_username: str | None = None
         self._app: Application | None = None
         self._start_time = time.time()
@@ -143,6 +144,9 @@ class NavaarBot:
 
     def set_agent(self, agent: object) -> None:
         self._agent = agent
+
+    def set_library(self, library: object) -> None:
+        self._library = library
 
     def _is_admin(self, update: Update) -> bool:
         user = update.effective_user
@@ -471,6 +475,8 @@ class NavaarBot:
             "/retry tg \u2014 Retry all failed TG\u2192YT\n"
             "/retry yt \u2014 Retry all failed YT\u2192TG\n"
             "/delete &lt;id&gt; \u2014 Remove a track everywhere\n"
+            "/library \u2014 Local music library (USB / Navidrome) status\n"
+            "/library sync \u2014 Rebuild missing library files now\n"
             "\n"
             "<b>Assistant</b>\n"
             "/context \u2014 Conversation context usage\n"
@@ -1032,10 +1038,14 @@ class NavaarBot:
             directions = ["yt_to_tg"]
         elif arg == "sp":
             directions = ["sp_to_tg", "sp_to_yt"]
+        elif arg == "library" and self._library is not None:
+            directions = ["library"]
         elif arg == "all":
             directions = ["tg_to_yt", "yt_to_tg"]
             if self._sp_enabled:
                 directions.extend(["tg_to_sp", "sp_to_tg", "yt_to_sp", "sp_to_yt"])
+            if self._library is not None:
+                directions.append("library")
         else:
             # Try exact direction name
             if arg in _DIR:
@@ -1048,6 +1058,36 @@ class NavaarBot:
 
         labels = [_DIR.get(d, d) for d in directions]
         await self._reply(update, f"\U0001f504 Sync triggered: {', '.join(labels)}")
+
+    # ── /library [sync] ──────────────────────────────────────────────
+
+    async def _cmd_library(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            return
+        if self._library is None:
+            await self._reply(update, "\U0001f4be Local library is disabled (NAVAAR_LIBRARY_DIR unset).")
+            return
+        if context.args and context.args[0].lower() == "sync":
+            if self._engine:
+                self._engine.force_sync("library")
+            await self._reply(update, "\U0001f504 Library sync triggered.")
+            return
+        st = await self._library.status()
+        lines = [
+            "<b>\U0001f4be Local music library</b>",
+            f"{st['present']}/{st['wanted']} songs \u00b7 {st['bytes'] / 1e6:.0f} MB",
+        ]
+        if st["pending"]:
+            lines.append(f"\u23f3 {st['pending']} waiting to download")
+        if st["failed"]:
+            lines.append(f"\u274c {len(st['failed'])} failing (auto-retry with backoff):")
+            for item, entry in st["failed"][:10]:
+                label = f"{item.artist} - {item.title}" if item.artist else item.title
+                lines.append(
+                    f"\u2022 {html.escape(label)} \u2014 {html.escape(str(entry.get('error', ''))[:120])}"
+                )
+        lines.append(f"<code>{html.escape(str(st['dir']))}</code>")
+        await self._reply(update, "\n".join(lines))
 
     async def _reset_all_failed_metered(self) -> int:
         """Reset every failed track for retry, incrementing RETRIES_TOTAL by each
@@ -1491,6 +1531,7 @@ class NavaarBot:
             BotCommand("sync", "Force sync: /sync [tg|yt|sp|all]"),
             BotCommand("retry", "Retry failed: /retry <id|all|tg|yt|sp>"),
             BotCommand("delete", "Remove a track everywhere: /delete <id>"),
+            BotCommand("library", "Local music library status: /library [sync]"),
             BotCommand("failed", "List failed tracks: /failed [tg|yt|sp]"),
             BotCommand("search", "Search YouTube Music: /search <query>"),
         ]
@@ -1601,6 +1642,7 @@ class NavaarBot:
             "force_sync": self._cmd_sync,  # alias
             "retry": self._cmd_retry,
             "delete": self._cmd_delete,
+            "library": self._cmd_library,
             "search": self._cmd_search,
             "search_sp": self._cmd_search_sp,
             "reset": self._cmd_reset,

@@ -11,6 +11,7 @@ resources:
   - deployment.yaml
   - service.yaml
   - backup-cronjob.yaml
+  - navidrome.yaml
 
 # The image tag is pinned to the exact commit that built it. CI rewrites `newTag`
 # (the `ci: pin image to <sha>` commit) AFTER pushing the image, so the manifest

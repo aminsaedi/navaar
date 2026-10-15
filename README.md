@@ -25,6 +25,22 @@ When audio is posted to any of the three services, Navaar automatically syncs it
 
 All six directions run as concurrent polling loops (defaults: 60s for TG→YT/TG→SP, 120s for all others). Cross-service deduplication prevents sync loops.
 
+## Local Library, Navidrome, Music Assistant & the Car USB Stick
+
+Navaar also mirrors every song in the channel into a local folder of tagged MP3s
+(`NAVAAR_LIBRARY_DIR`, on thinkcentre `/home/amin/music/navaar`) plus a `Navaar.m3u8` playlist:
+
+```
+channel / YT ──navaar library loop──► thinkcentre:~/music/navaar
+                                        ├─► Navidrome (k8s) ──► https://music.aminsaedi.com
+                                        ├─► NFS (read-only) ──► Music Assistant on mx
+                                        └─► udev + systemd ──► USB stick labelled NAVAAR → /navaar
+```
+
+Plug in the stick and it syncs immediately; leave it plugged in and it stays in sync. See
+[`deploy/host/thinkcentre/README.md`](deploy/host/thinkcentre/README.md). `/library` in the bot
+shows the library's state.
+
 ## Setup
 
 ### Prerequisites

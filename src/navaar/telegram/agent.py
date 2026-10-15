@@ -115,6 +115,17 @@ loop retries and uploads a duplicate to the channel.
 and no `failure_reason`, reset it: `UPDATE tracks SET status='retry_scheduled'
 WHERE id=<id>`. Check `sync_log` for clues first.
 
+## Local music library (`/library`)
+Every song in the channel is mirrored as a tagged MP3 into `/library` (hostPath
+`/home/amin/music/navaar` on thinkcentre) by the `library` sync loop, plus a
+channel-ordered `Navaar.m3u8`. Navidrome (https://music.aminsaedi.com), Music Assistant and
+the car USB stick all read that folder. It is **derived state — never edit it by hand**:
+deleting/purging a track removes its file on the next cycle; a file deleted by hand is
+rebuilt. State: `sync_state['library_manifest']` (JSON keyed by the channel `tg_message_id`:
+`file`, `source`, and for failures `attempts`/`next_retry`/`error`). Each MP3 carries its key
+as ID3 `TXXX:NAVAAR_ID`. To retry a failed song now, drop its manifest entry and force the
+loop (`/sync library`). Status: `/library`.
+
 ## Honesty
 You only see what's in this pod: the database (tracks Navaar ingested since it started) and the
 filesystem. A Telegram **bot cannot read the channel's older message history**, so you do not

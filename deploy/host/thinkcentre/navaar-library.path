@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the Navaar music library for added/removed songs
+
+[Path]
+# navaar's library loop moves finished files into place (IN_MOVED_TO) and deletes
+# removed ones; either starts a (debounced) copy to the stick if one is attached.
+PathChanged=/home/amin/music/navaar
+Unit=navaar-usb-sync@change.service
+
+[Install]
+WantedBy=paths.target

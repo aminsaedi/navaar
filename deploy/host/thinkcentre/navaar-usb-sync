@@ -1,0 +1,141 @@
+#!/bin/bash
+# Mirror the Navaar music library onto the car USB stick (FAT32, label NAVAAR).
+#
+#   navaar-usb-sync attach   udev: stick just plugged in  -> always sync + notify
+#   navaar-usb-sync change   library changed              -> debounce, sync if stick present
+#   navaar-usb-sync timer    every 10 min                 -> sync only if library changed
+#
+# The stick is mounted only for the copy and unmounted right after, so pulling it
+# out at any other moment is safe. Each copy is retried with backoff while the
+# stick stays attached. Telegram notifications are optional (/etc/navaar-usb/notify.env).
+set -uo pipefail
+
+TRIGGER="${1:-manual}"
+LIB=/home/amin/music/navaar
+LABEL=NAVAAR
+DEST_DIR=navaar
+DEV="/dev/disk/by-label/$LABEL"
+MNT=/run/navaar-usb/mnt
+STATE=/var/lib/navaar-usb
+ATTEMPTS=5
+NOTIFY_ENV=/etc/navaar-usb/notify.env
+
+log() { echo "[$TRIGGER] $*"; }
+
+notify() {
+    [ -r "$NOTIFY_ENV" ] || return 0
+    # shellcheck disable=SC1090
+    . "$NOTIFY_ENV"
+    [ -n "${BOT_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ] || return 0
+    curl -s -m 20 -o /dev/null "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=$1" || true
+}
+
+# Fingerprint of what should be on the stick (names, sizes, mtimes).
+lib_hash() {
+    find "$LIB" -maxdepth 1 -type f \( -name '*.mp3' -o -name '*.m3u8' \) -printf '%f %s %T@\n' \
+        | sort | sha256sum | cut -d' ' -f1
+}
+lib_summary() {
+    local n mb
+    n=$(find "$LIB" -maxdepth 1 -type f -name '*.mp3' | wc -l)
+    mb=$(du -sm --exclude=.navaar-tmp "$LIB" | cut -f1)
+    echo "$n songs, ${mb} MB"
+}
+
+cleanup_mount() {
+    if mountpoint -q "$MNT"; then
+        sync
+        umount "$MNT" || umount -l "$MNT"
+    fi
+}
+trap cleanup_mount EXIT
+
+copy_once() {
+    cleanup_mount
+    # A stick yanked out of a car/PC is usually marked dirty; repair it first
+    # (exit 1 = errors corrected, which is fine).
+    fsck.vfat -a -w "$DEV" >/dev/null 2>&1
+    [ $? -le 1 ] || log "fsck.vfat reported uncorrectable errors (continuing)"
+    mkdir -p "$MNT"
+    mount -t vfat -o rw,nosuid,nodev,noexec,noatime,flush,uid=1000,gid=1000,fmask=0133,dmask=0022,shortname=mixed,utf8,errors=remount-ro \
+        "$DEV" "$MNT" || { log "mount failed"; return 1; }
+    mkdir -p "$MNT/$DEST_DIR" || return 1
+
+    local need avail
+    need=$(du -sk --exclude=.navaar-tmp "$LIB" | cut -f1)
+    avail=$(df -k --output=avail "$MNT" | tail -1)
+    have=$(du -sk "$MNT/$DEST_DIR" | cut -f1)
+    if [ $((need - have)) -gt "$avail" ]; then
+        LAST_ERROR="stick full: need ${need} KB, free ${avail} KB"
+        log "$LAST_ERROR"; return 2
+    fi
+
+    # FAT32: no owners/perms, 2 s mtime granularity. rsync writes each file under a
+    # temp name and renames it, so a half-copied song never shows up as an .mp3.
+    local out
+    out=$(rsync -rt --delete --delete-delay --modify-window=2 --itemize-changes \
+            --exclude='.navaar-tmp/' --exclude='*.tmp' \
+            "$LIB/" "$MNT/$DEST_DIR/" 2>&1)
+    local rc=$?
+    COPIED=$(grep -c '^>f' <<<"$out")
+    DELETED=$(grep -c '^\*deleting' <<<"$out")
+    if [ $rc -ne 0 ]; then
+        LAST_ERROR="rsync exit $rc: $(tail -2 <<<"$out" | tr '\n' ' ')"
+        log "$LAST_ERROR"; return 1
+    fi
+    sync
+    umount "$MNT" || { LAST_ERROR="unmount failed"; return 1; }
+    return 0
+}
+
+# Serialize all triggers (attach, change, timer can overlap).
+mkdir -p /run/navaar-usb "$STATE"
+exec 9>/run/navaar-usb/lock
+flock -w 3600 9 || { log "could not get lock"; exit 1; }
+
+if [ "$TRIGGER" = change ]; then
+    sleep 30  # let a burst of library updates settle into one copy
+fi
+
+if [ ! -b "$DEV" ]; then
+    log "no USB stick labelled $LABEL attached"
+    exit 0
+fi
+[ -d "$LIB" ] || { log "library $LIB missing"; exit 1; }
+UUID=$(blkid -s UUID -o value "$DEV")
+
+LAST_ERROR="" COPIED=0 DELETED=0
+while :; do
+    want=$(lib_hash)
+    if [ "$TRIGGER" != attach ] && [ "$TRIGGER" != manual ] \
+        && [ "$(cat "$STATE/$UUID.hash" 2>/dev/null)" = "$want" ]; then
+        log "stick $UUID already up to date"
+        exit 0
+    fi
+
+    ok=0
+    for attempt in $(seq 1 $ATTEMPTS); do
+        [ -b "$DEV" ] || { log "stick removed, stopping"; exit 0; }
+        log "copy attempt $attempt/$ATTEMPTS to stick $UUID"
+        copy_once; rc=$?
+        if [ $rc -eq 0 ]; then ok=1; break; fi
+        [ $rc -eq 2 ] && break  # out of space: retrying won't help
+        sleep $((attempt * 15))
+    done
+
+    if [ $ok -ne 1 ]; then
+        [ -b "$DEV" ] || exit 0
+        notify "❌ Navaar USB sync failed: ${LAST_ERROR:-unknown error}"
+        exit 1
+    fi
+    echo "$want" > "$STATE/$UUID.hash"
+    log "synced: $(lib_summary) (+$COPIED copied, -$DELETED deleted)"
+    if [ "$TRIGGER" = attach ] || [ "$COPIED" -gt 0 ] || [ "$DELETED" -gt 0 ]; then
+        notify "✅ Navaar USB stick synced — $(lib_summary) (+$COPIED new, -$DELETED removed). Safe to unplug."
+    fi
+    # The library may have changed while we were copying: loop until stable.
+    [ "$(lib_hash)" = "$want" ] && break
+    TRIGGER=change COPIED=0 DELETED=0
+done
+exit 0

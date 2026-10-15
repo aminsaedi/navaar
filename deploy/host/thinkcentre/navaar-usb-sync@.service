@@ -1,0 +1,12 @@
+[Unit]
+Description=Copy the Navaar music library to the NAVAAR USB stick (trigger: %i)
+Documentation=https://github.com/aminsaedi/navaar/blob/main/deploy/host/thinkcentre/README.md
+After=local-fs.target network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/navaar-usb-sync %i
+TimeoutStartSec=2h
+# Background job: never compete with the desktop or the k3s workloads.
+Nice=10
+IOSchedulingClass=idle

@@ -118,6 +118,42 @@ track (already deduped) itself:
 Cross-service dedup prevents loops: `has_track_for_direction` checks whether a track already
 exists for the target direction keyed by the same external id before creating a fan-out row.
 
+### Local Music Library
+
+`LibrarySync` (`library/sync.py`) is a seventh engine loop (`direction = "library"`,
+`process_pending()`), enabled when `NAVAAR_LIBRARY_DIR` is set. It mirrors **every song in the
+channel** into that folder as a car-player-friendly MP3, and it is the single source for the
+rest of the music stack: Navidrome (`deploy/k8s/navidrome.yaml`, https://music.aminsaedi.com),
+Music Assistant on mx (NFS, read-only) and the car USB stick (`deploy/host/thinkcentre/`).
+
+- **What's in it**: `TrackRepository.get_channel_tracks()` — rows with `tg_message_id` (exactly
+  one per logical track: the channel audio message), excluding `duplicate`/`unsynced`, oldest
+  first. `LibrarySync.plan()` drops the same song posted twice (same `yt_video_id` or same
+  artist+title, case/space-insensitive), keeping the oldest.
+- **Identity**: `str(tg_message_id)`, also written into each file as ID3 `TXXX:NAVAAR_ID`.
+  State is `SyncState['library_manifest']`; if it is lost, existing files are *adopted* by
+  that tag instead of re-downloaded. Unknown `.mp3` files in the folder are deleted — the
+  folder is derived state.
+- **Source**: the channel's own file via Bot API `getFile` when the row has `tg_file_id`
+  (channel posts); YouTube via yt-dlp for bot uploads (yt→tg/sp→tg rows store no file id) and
+  for files over the 20 MB `getFile` cap. The library uses its own `YTDownloader` with a 4 GB
+  cap so nothing is down-encoded to fit Telegram's upload limit.
+- **Format** (`library/audio.py`): MP3 sources are stream-copied, others encoded CBR
+  `NAVAAR_LIBRARY_BITRATE_KBPS` (320). Tags rewritten as **ID3v2.3** + v1 (many head units can't
+  read v2.4), album "Navaar"/compilation, ≤500 px square baseline-JPEG cover (embedded art,
+  else the YouTube thumbnail). Names are `Artist - Title.mp3`, FAT32-safe (`library/naming.py`).
+- **Atomicity**: built under `<dir>/.navaar-tmp/` and `os.replace`d into place; readers
+  (Navidrome's watcher, NFS, rsync to the stick) never see partial files. `Navaar.m3u8`
+  (UTF-8, relative paths, channel order) is rewritten only when it changes.
+- **Failures**: per-song exponential backoff (5 min doubling to 1 day) recorded in the
+  manifest; one bad song never blocks the others. `NAVAAR_LIBRARY_MAX_PER_CYCLE` (10) bounds a
+  cycle so the first fill can't trip `/readyz` staleness. A missing library dir raises (→
+  engine backoff + Telegram alert).
+- **Bot**: `/library` (counts, size, failing songs), `/library sync` / `/sync library`.
+- **Deployment**: hostPath `/home/amin/music/navaar` (type `Directory`; created by
+  `deploy/host/thinkcentre/install.sh` owned by uid 1000, SELinux `container_file_t`) mounted at
+  `/library`. The pod is already pinned to thinkcentre.
+
 ### Status Cards
 
 `TrackCardService` (`telegram/cards.py`) replies, in the channel, to each track's audio

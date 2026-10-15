@@ -22,6 +22,11 @@ data:
   NAVAAR_SYNC_INTERVAL_SP_TO_TG: "120"
   NAVAAR_SYNC_INTERVAL_YT_TO_SP: "120"
   NAVAAR_SYNC_INTERVAL_SP_TO_YT: "120"
+  # Local music library: every channel song as a tagged MP3 (+ Navaar.m3u8) in a
+  # hostPath on thinkcentre — the source for Navidrome, Music Assistant and the car
+  # USB stick. Unset to disable the library loop.
+  NAVAAR_LIBRARY_DIR: "/library"
+  NAVAAR_SYNC_INTERVAL_LIBRARY: "300"
   # Natural-language control (reply+@mention the bot, or DM it): the Claude Agent
   # SDK runs Claude Code inside the pod, pointed at the Anthropic endpoint. It has
   # full Bash/file tools (runs as uid 1000 next to the DB and tokens) — accepted.

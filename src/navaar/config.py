@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     sync_interval_sp_to_yt: int = 120
     max_retries: int = 3
 
+    # Local music library: every song in the channel mirrored as a tagged MP3 into
+    # this directory (served by Navidrome, mounted by Music Assistant, copied to the
+    # car USB stick by the host). Empty disables the library loop.
+    library_dir: str = ""
+    sync_interval_library: int = 300
+    library_bitrate_kbps: int = 320   # only for non-MP3 sources; MP3 is stream-copied
+    library_max_per_cycle: int = 10   # bounds a cycle (first fill) under /readyz staleness
+    library_playlist_name: str = "Navaar"
+
     database_url: str = "sqlite+aiosqlite:///navaar.db"
     api_port: int = 8080
     log_level: str = "INFO"

@@ -324,6 +324,23 @@ class TrackRepository:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
+    async def get_channel_tracks(self) -> list[Track]:
+        """Rows whose audio lives in the Telegram channel, oldest first.
+
+        Exactly one row per logical track carries ``tg_message_id`` (the channel
+        audio message: tg_to_yt for channel posts, yt_to_tg / sp_to_tg for bot
+        uploads), so this is "every song in the channel". ``duplicate`` and
+        ``unsynced`` rows are excluded — the song is either elsewhere in the
+        channel already or was deliberately taken out."""
+        async with self._sf() as session:
+            result = await session.execute(
+                select(Track)
+                .where(Track.tg_message_id.is_not(None))
+                .where(Track.status.not_in(("duplicate", "unsynced")))
+                .order_by(Track.created_at, Track.id)
+            )
+            return list(result.scalars().all())
+
     async def get_all_tracks(self, limit: int = 5000) -> list[Track]:
         """Every track row (bounded), oldest first — for whole-DB groupings such as
         the /health partial-sync report on a small deployment."""

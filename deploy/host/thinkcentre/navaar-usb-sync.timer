@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep a long-plugged NAVAAR USB stick in sync with the Navaar library
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+Unit=navaar-usb-sync@timer.service
+
+[Install]
+WantedBy=timers.target
