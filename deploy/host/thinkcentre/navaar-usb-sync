@@ -143,6 +143,9 @@ while :; do
         log "copy attempt $attempt/$ATTEMPTS to stick $UUID"
         copy_once; rc=$?
         if [ $rc -eq 0 ]; then ok=1; break; fi
+        # Never leave a failed attempt mounted: if the stick was yanked mid-copy the
+        # mount would point at a vanished device until the next attempt.
+        umount "$MNT" 2>/dev/null || umount -l "$MNT" 2>/dev/null
         [ $rc -eq 2 ] && break  # out of space: retrying won't help
         sleep $((attempt * 15))
     done
