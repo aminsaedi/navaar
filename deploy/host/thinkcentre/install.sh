@@ -15,10 +15,15 @@ semanage fcontext -a -t container_file_t "/home/amin/music(/.*)?" 2>/dev/null \
     || semanage fcontext -m -t container_file_t "/home/amin/music(/.*)?"
 restorecon -R /home/amin/music
 
-# 2. Read-only NFS export for Music Assistant on mx (over Tailscale).
+# 2. Read-only NFS export for Music Assistant on mx (over Tailscale), via a bind
+#    mount under /srv so the export exposes nothing of /home/amin.
+install -d -m 755 /srv/navaar-music
+install -m 644 'srv-navaar\x2dmusic.mount' /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now 'srv-navaar\x2dmusic.mount'
 cat > /etc/exports.d/navaar-music.exports <<EXPORTS
 # Navaar music library -> Music Assistant on mx (read-only, over Tailscale)
-$LIB 100.114.59.86(ro,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+/srv/navaar-music 100.114.59.86(ro,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000,fsid=7301)
 EXPORTS
 systemctl enable --now nfs-server
 exportfs -ra

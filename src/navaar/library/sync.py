@@ -12,7 +12,13 @@ import structlog
 from navaar.db.models import Track
 from navaar.db.repository import SyncStateRepository, TrackRepository
 from navaar.library import audio
-from navaar.library.naming import clean_title, dedupe_key, track_stem, unique_file_name
+from navaar.library.naming import (
+    clean_artist,
+    clean_title,
+    dedupe_key,
+    track_stem,
+    unique_file_name,
+)
 from navaar.metrics import LIBRARY_BYTES_GAUGE, LIBRARY_FAILED_GAUGE, LIBRARY_TRACKS_GAUGE
 from navaar.telegram.client import FileTooBigError, TelegramClient
 from navaar.ytmusic.downloader import YTDownloader
@@ -41,6 +47,11 @@ class LibraryItem:
     artist: str | None
     tg_file_id: str | None
     yt_video_id: str | None
+
+    @property
+    def meta(self) -> str:
+        """What the file is tagged/named with; a change means retag + rename."""
+        return f"{self.artist or ''}\x1f{self.title}"
 
 
 class LibrarySync:
@@ -99,8 +110,9 @@ class LibrarySync:
         for row in rows:
             if row.tg_message_id is None:
                 continue
-            title = clean_title(row.artist, row.title)
-            name_key = dedupe_key(row.artist, title)
+            artist = clean_artist(row.artist)
+            title = clean_title(artist, row.title)
+            name_key = dedupe_key(artist, title)
             if name_key in seen_names or (row.yt_video_id and row.yt_video_id in seen_videos):
                 continue
             seen_names.add(name_key)
@@ -109,7 +121,7 @@ class LibrarySync:
             items.append(LibraryItem(
                 key=str(row.tg_message_id),
                 title=title,
-                artist=row.artist,
+                artist=artist,
                 tg_file_id=row.tg_file_id,
                 yt_video_id=row.yt_video_id,
             ))
@@ -145,6 +157,14 @@ class LibrarySync:
                 entry["file"] = None
                 changed = True
 
+        # 2b. display metadata changed (title cleanup, artist fixed in the DB):
+        #     retag and rename in place rather than downloading again.
+        for key, item in wanted.items():
+            entry = manifest.get(key, {})
+            if entry.get("file") and entry.get("meta") != item.meta:
+                if self._retag(item, entry, manifest):
+                    changed = True
+
         # 3. stray .mp3 files: adopt ours (manifest lost), delete anything else.
         owned = {e["file"] for e in manifest.values() if e.get("file")}
         for path in sorted(self._root.glob("*.mp3")):
@@ -152,7 +172,7 @@ class LibrarySync:
                 continue
             key = audio.read_navaar_id(path)
             if key in wanted and not manifest.get(key, {}).get("file"):
-                manifest[key] = {"file": path.name, "source": "adopted"}
+                manifest[key] = {"file": path.name, "source": "adopted"}  # meta unset -> retag next
                 owned.add(path.name)
                 logger.info("library_file_adopted", key=key, file=path.name)
             else:
@@ -188,7 +208,7 @@ class LibrarySync:
                     attempts=attempts, error=str(exc)[:300],
                 )
             else:
-                manifest[item.key] = {"file": name, "source": source}
+                manifest[item.key] = {"file": name, "source": source, "meta": item.meta}
                 built += 1
                 logger.info("library_track_added", key=item.key, file=name, source=source)
             # Persist after every track so a restart mid-fill loses nothing.
@@ -221,6 +241,25 @@ class LibrarySync:
             return name, source
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def _retag(self, item: LibraryItem, entry: dict, manifest: dict[str, dict]) -> bool:
+        old_path = self._root / entry["file"]
+        try:
+            audio.retag(old_path, title=item.title, artist=item.artist)
+        except Exception:
+            # Unreadable/corrupt file: drop it so the fetch step rebuilds it.
+            logger.warning("library_retag_failed", key=item.key, file=entry["file"], exc_info=True)
+            old_path.unlink(missing_ok=True)
+            entry["file"] = None
+            return True
+        taken = {e["file"] for k, e in manifest.items() if e.get("file") and k != item.key}
+        new_name = unique_file_name(track_stem(item.artist, item.title), taken)
+        if new_name != entry["file"]:
+            os.replace(old_path, self._root / new_name)
+            logger.info("library_track_renamed", key=item.key, old=entry["file"], new=new_name)
+            entry["file"] = new_name
+        entry["meta"] = item.meta
+        return True
 
     async def _download(self, item: LibraryItem, work: Path) -> tuple[Path, str]:
         """Prefer the exact audio posted in the channel; fall back to YouTube for

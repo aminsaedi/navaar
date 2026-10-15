@@ -7,7 +7,7 @@ The navaar pod (pinned to thinkcentre) mirrors every channel song into
 | Consumer | How |
 |---|---|
 | **Navidrome** (`deploy/k8s/navidrome.yaml`) | hostPath, read-only → https://music.aminsaedi.com |
-| **Music Assistant** (docker on mx) | NFS export below, read-only, over Tailscale |
+| **Music Assistant** (docker on mx) | NFS `/srv/navaar-music` (read-only bind of the library), Tailscale only; mounted by a Docker NFS volume |
 | **Car USB stick** | udev + systemd units in this directory |
 
 Install / update: `sudo ./install.sh` (idempotent).

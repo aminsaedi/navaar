@@ -1,0 +1,14 @@
+[Unit]
+Description=Navaar music library at /srv/navaar-music (NFS export point)
+# Export a read-only bind under /srv instead of the path inside /home/amin: the NFS
+# export then exposes nothing of the home directory, and is read-only at the mount
+# level as well as in /etc/exports.d/navaar-music.exports.
+
+[Mount]
+What=/home/amin/music/navaar
+Where=/srv/navaar-music
+Type=none
+Options=bind,ro
+
+[Install]
+WantedBy=multi-user.target

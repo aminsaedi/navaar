@@ -24,6 +24,17 @@ _TITLE_NOISE = re.compile(
 _ARTIST_PREFIX_SEP = re.compile(r"^\s*[-\u2013\u2014:|]\s*")
 
 
+_TOPIC_SUFFIX = re.compile(r"\s*-\s*topic\s*$", re.IGNORECASE)
+
+
+def clean_artist(artist: str | None) -> str | None:
+    """Drop YouTube's auto-generated channel suffix: 'Siavash Ghomayshi - Topic'."""
+    if not artist:
+        return None
+    cleaned = _SPACES.sub(" ", _TOPIC_SUFFIX.sub("", artist)).strip()
+    return cleaned or artist.strip() or None
+
+
 def clean_title(artist: str | None, title: str | None) -> str:
     """Title as it should appear on a car screen: without a repeated
     'Artist - ' prefix and without '(Official Music Video)'-style noise."""

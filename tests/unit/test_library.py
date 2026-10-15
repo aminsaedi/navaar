@@ -9,7 +9,7 @@ import pytest
 
 from navaar.db.repository import TrackRepository
 from navaar.library import audio
-from navaar.library.naming import clean_title, track_stem, unique_file_name
+from navaar.library.naming import clean_artist, clean_title, track_stem, unique_file_name
 from navaar.library.sync import MANIFEST_KEY, LibrarySync
 from navaar.telegram.client import FileTooBigError
 
@@ -69,6 +69,7 @@ def fake_audio(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(audio, "build_mp3", build_mp3)
     monkeypatch.setattr(audio, "extract_cover", no_cover)
     monkeypatch.setattr(audio, "fetch_youtube_cover", no_cover)
+    monkeypatch.setattr(audio, "retag", lambda p, **kw: None)
     monkeypatch.setattr(
         audio, "read_navaar_id",
         lambda p: p.read_bytes().split(b"|")[-1].decode() if b"|" in p.read_bytes() else None,
@@ -112,6 +113,13 @@ def test_track_stem_is_fat32_safe() -> None:
 )
 def test_clean_title(artist, title, expected) -> None:
     assert clean_title(artist, title) == expected
+
+
+def test_clean_artist_drops_youtube_topic_suffix() -> None:
+    assert clean_artist("Siavash Ghomayshi - Topic") == "Siavash Ghomayshi"
+    assert clean_artist("Ebi") == "Ebi"
+    assert clean_artist(None) is None
+    assert clean_title(clean_artist("Ebi - Topic"), "Ebi - Khalij") == "Khalij"
 
 
 def test_unique_file_name_is_case_insensitive() -> None:
@@ -159,8 +167,8 @@ async def test_cycle_builds_files_manifest_and_playlist(
     assert (library_dir / "A - Tg Song.mp3").read_bytes() == b"tg-audio|10"
     assert (library_dir / "B - Yt Song.mp3").read_bytes() == b"yt-audio|11"
     manifest = await sync_state_repo.get_json(MANIFEST_KEY)
-    assert manifest["10"] == {"file": "A - Tg Song.mp3", "source": "telegram"}
-    assert manifest["11"] == {"file": "B - Yt Song.mp3", "source": "youtube"}
+    assert manifest["10"] == {"file": "A - Tg Song.mp3", "source": "telegram", "meta": "A\x1fTg Song"}
+    assert manifest["11"] == {"file": "B - Yt Song.mp3", "source": "youtube", "meta": "B\x1fYt Song"}
     playlist = (library_dir / "Navaar.m3u8").read_text(encoding="utf-8").splitlines()
     assert playlist[0] == "#EXTM3U"
     assert [line for line in playlist if line.endswith(".mp3")] == [
@@ -324,3 +332,51 @@ async def test_build_mp3_writes_car_friendly_tags(tmp_path: Path, monkeypatch) -
     )
     assert MP3(again).info.bitrate == 320000
     assert audio.read_navaar_id(again) == "43"
+
+    audio.retag(again, title="New Title", artist="New Artist")
+    tags = ID3(again)
+    assert tags.version[:2] == (2, 3)
+    assert str(tags["TIT2"]) == "New Title" and str(tags["TPE1"]) == "New Artist"
+    assert audio.read_navaar_id(again) == "43"  # identity survives the retag
+
+
+async def test_metadata_change_retags_and_renames_without_download(
+    track_repo, sync_state_repo, mock_tg, mock_dl, library_dir: Path, monkeypatch
+) -> None:
+    retagged = []
+    monkeypatch.setattr(audio, "retag", lambda p, **kw: retagged.append((p.name, kw)))
+    t = await add_channel_track(track_repo, 10, "Golaye Pooneh",
+                                artist="Siavash Ghomayshi - Topic", tg_file_id="f1")
+    sync = make_sync(track_repo, sync_state_repo, mock_tg, mock_dl, library_dir)
+    await sync.process_pending()
+    assert (library_dir / "Siavash Ghomayshi - Golaye Pooneh.mp3").exists()
+    assert retagged == []
+
+    await track_repo.update_track(t.id, artist="Siavash Ghomayshi", title="Golaye Poone")
+    assert await sync.process_pending() == 0  # nothing downloaded again
+
+    assert mock_tg.download_file.await_count == 1
+    assert retagged == [("Siavash Ghomayshi - Golaye Pooneh.mp3",
+                         {"title": "Golaye Poone", "artist": "Siavash Ghomayshi"})]
+    assert (library_dir / "Siavash Ghomayshi - Golaye Poone.mp3").exists()
+    assert not (library_dir / "Siavash Ghomayshi - Golaye Pooneh.mp3").exists()
+    manifest = await sync_state_repo.get_json(MANIFEST_KEY)
+    assert manifest["10"]["file"] == "Siavash Ghomayshi - Golaye Poone.mp3"
+
+
+async def test_unreadable_file_on_retag_is_rebuilt(
+    track_repo, sync_state_repo, mock_tg, mock_dl, library_dir: Path, monkeypatch
+) -> None:
+    t = await add_channel_track(track_repo, 10, "Old", artist="A", tg_file_id="f1")
+    sync = make_sync(track_repo, sync_state_repo, mock_tg, mock_dl, library_dir)
+    await sync.process_pending()
+
+    def broken(p, **kw):
+        raise ValueError("can't sync to MPEG frame")
+
+    monkeypatch.setattr(audio, "retag", broken)
+    await track_repo.update_track(t.id, title="New")
+    assert await sync.process_pending() == 1  # rebuilt from source
+    assert mock_tg.download_file.await_count == 2
+    assert (library_dir / "A - New.mp3").exists()
+    assert not (library_dir / "A - Old.mp3").exists()

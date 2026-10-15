@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 import structlog
-from mutagen.id3 import ID3, ID3NoHeaderError
+from mutagen.id3 import ID3, TIT2, TPE1, ID3NoHeaderError
 
 logger = structlog.get_logger()
 
@@ -141,3 +141,14 @@ def read_navaar_id(path: Path) -> str | None:
         return None
     frame = tags.get(f"TXXX:{NAVAAR_ID_TAG}")
     return str(frame.text[0]) if frame and frame.text else None
+
+
+def retag(path: Path, *, title: str, artist: str | None) -> None:
+    """Rewrite title/artist in place (ID3v2.3) — no re-download, no re-encode."""
+    tags = ID3(path)
+    tags.setall("TIT2", [TIT2(encoding=1, text=title)])
+    if artist:
+        tags.setall("TPE1", [TPE1(encoding=1, text=artist)])
+    else:
+        tags.delall("TPE1")
+    tags.save(path, v2_version=3, v1=2)
