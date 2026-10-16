@@ -186,8 +186,10 @@ class NavaarAgent:
         sync_state: SyncStateRepository,
         enabled: bool = True,
         context_window: int = 200000,
+        effort: str = "medium",
     ) -> None:
         self._model = model
+        self._effort = effort
         self._timeout = timeout
         self._max_turns = max_turns
         self._workspace = workspace_dir
@@ -232,6 +234,7 @@ class NavaarAgent:
     async def _run_query(self, prompt: str, resume: str | None = None) -> tuple[str, dict]:
         options = ClaudeAgentOptions(
             model=self._model,
+            effort=self._effort,
             cwd=self._workspace,
             permission_mode="bypassPermissions",
             max_turns=self._max_turns,

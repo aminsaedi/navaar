@@ -249,6 +249,7 @@ async def run() -> None:
 
         agent = NavaarAgent(
             model=settings.nl_model,
+            effort=settings.nl_effort,
             timeout=settings.nl_request_timeout,
             max_turns=settings.nl_max_turns,
             workspace_dir=settings.nl_workspace_dir,
@@ -256,7 +257,7 @@ async def run() -> None:
             context_window=settings.nl_context_window,
         )
         bot_app_builder.set_agent(agent)
-        logger.info("nl_agent_enabled", model=settings.nl_model)
+        logger.info("nl_agent_enabled", model=settings.nl_model, effort=settings.nl_effort)
 
     # FastAPI app
     start_time = time.time()

@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     # ANTHROPIC_API_KEY (read from the environment by the SDK). Live only when
     # nl_agent_enabled is set.
     nl_agent_enabled: bool = False
-    nl_model: str = "claude-sonnet-4-6"
+    nl_model: str = "claude-sonnet-5-5"
+    # Reasoning effort handed to Claude Code via the Agent SDK (low|medium|high|xhigh|max).
+    # Claude Code's own default for Sonnet 5.5 is medium; made explicit so it can't drift.
+    nl_effort: str = "medium"
     nl_request_timeout: int = 600  # overall wall-clock cap per agent run (seconds)
     nl_max_turns: int = 40         # agentic tool-use round trips per run (monitor/verify
                                    # tasks poll the 120s sync loops, so they need headroom)
