@@ -133,7 +133,13 @@ metadata:
   name: navidrome
   namespace: navaar
 spec:
-  ingressClassName: public-edge  # Path C: the opt-in to the public internet
+  # Path B: Cloudflare edge -> tunnel -> in-cluster traefik. The hostname must
+  # also be listed in the tunnel config (homelab-ingress/cloudflared.yaml).
+  ingressClassName: traefik
+  tls:
+    - secretName: wildcard-aminsaedi-com-tls
+      hosts:
+        - music.aminsaedi.com
   rules:
     - host: music.aminsaedi.com
       http:
@@ -145,3 +151,18 @@ spec:
                 name: navidrome
                 port:
                   number: 80
+---
+# Path B needs the wildcard cert in this namespace (traefik serves it).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-aminsaedi-com
+  namespace: navaar
+spec:
+  secretName: wildcard-aminsaedi-com-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-dns-prod
+  dnsNames:
+    - "*.aminsaedi.com"
+    - "aminsaedi.com"
