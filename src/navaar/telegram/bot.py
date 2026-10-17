@@ -290,6 +290,11 @@ class NavaarBot:
         if message.photo:
             dest = await self._download_photo(message, context)
             text = f"[image saved at {dest}]\n{text}".strip()
+        # Hand the agent the replied-to message's content directly, so it never
+        # has to fetch it (a bot cannot, and forwardMessage would spam a chat).
+        reply_ctx = await self._reply_context(message, context)
+        if reply_ctx:
+            text = f"{reply_ctx}\n\n{text}"
 
         # Feedback in the channel: Telegram does NOT render typing indicators in
         # channels, so post an editable placeholder and swap in the real answer when
@@ -329,7 +334,11 @@ class NavaarBot:
         if not message:
             return
         if message.text:
-            await self._run_agent_with_feedback(message, context, message.text, siblings=None)
+            text = message.text
+            reply_ctx = await self._reply_context(message, context)
+            if reply_ctx:
+                text = f"{reply_ctx}\n\n{text}"
+            await self._run_agent_with_feedback(message, context, text, siblings=None)
         elif message.photo:
             await self._handle_dm_photo(message, context)
 
@@ -345,6 +354,47 @@ class NavaarBot:
         await tg_file.download_to_drive(dest)
         return dest
 
+    async def _reply_context(self, message, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """The content of the message `message` replies to, as a prompt prefix.
+
+        The agent must never fetch channel messages itself: a bot cannot read
+        channel history, and the obvious workaround — `forwardMessage` — is not a
+        read: it *posts a copy into the destination chat*. Probing message ids
+        with it dumped a burst of forwards into the admin's DM (the spam bug).
+        So the bot hands the agent the replied-to message directly: its
+        text/caption, and any attached photo/document saved to disk.
+        """
+        replied = getattr(message, "reply_to_message", None)
+        # A real Telegram message_id is an int; anything else (or None) means
+        # there is no usable replied-to message.
+        if replied is None or not isinstance(getattr(replied, "message_id", None), int):
+            return ""
+        parts = [f"[the message being replied to, id={replied.message_id}]"]
+        if getattr(replied, "text", None):
+            parts.append(replied.text)
+        if getattr(replied, "caption", None):
+            parts.append(replied.caption)
+        audio = getattr(replied, "audio", None)
+        if audio is not None and getattr(audio, "title", None):
+            parts.append(f"[replied-to audio: {audio.performer or ''} — {audio.title or ''}]")
+        photo = getattr(replied, "photo", None)
+        document = getattr(replied, "document", None)
+        if isinstance(photo, (list, tuple)) and photo:
+            dest = await self._download_photo(replied, context)
+            parts.append(f"[replied-to image saved at {dest}]")
+        elif document is not None and not isinstance(document, str):
+            try:
+                import os
+                tg_file = await context.bot.get_file(document.file_id)
+                os.makedirs("/tmp/navaar_files", exist_ok=True)
+                name = document.file_name or document.file_unique_id
+                dest = f"/tmp/navaar_files/{name}"
+                await tg_file.download_to_drive(dest)
+                parts.append(f"[replied-to file saved at {dest}]")
+            except Exception:
+                parts.append("[replied-to file could not be downloaded]")
+        return "\n".join(parts)
+
     async def _handle_dm_photo(
         self, message, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -355,6 +405,9 @@ class NavaarBot:
         # Build a prompt that tells the agent where the image lives so it can
         # Read it with its vision tool.
         prompt = f"[image saved at {dest}]\n{caption}".strip()
+        reply_ctx = await self._reply_context(message, context)
+        if reply_ctx:
+            prompt = f"{reply_ctx}\n\n{prompt}"
         await self._run_agent_with_feedback(message, context, prompt, siblings=None)
 
     async def _run_agent_with_feedback(

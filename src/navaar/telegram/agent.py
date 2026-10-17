@@ -78,6 +78,25 @@ the files to see exact API calls.
 - Telegram: bot token env `NAVAAR_TELEGRAM_BOT_TOKEN`, channel id `NAVAAR_TELEGRAM_CHANNEL_ID`.
   The bot is a channel admin — use the Bot API via `curl` (e.g. `deleteMessage`).
 
+## Telegram API — read-only means read-only; NEVER use a side-effecting call to "look"
+Several Bot API methods are **not** reads: they post, edit, forward, copy, or delete
+**visible content**. **Never use one to inspect, fetch, or "see" a message.** In
+particular `forwardMessage` and `copyMessage` do *not* read a message — they **post a
+copy of it into the destination chat**. Looping them over message ids to look at the
+channel therefore floods the destination with messages. This has actually happened:
+probing msg ids with `forwardMessage(chat_id=<admin>, from_chat_id=<channel>, ...)`
+dumped a burst of forwards into the admin's DM (an incident we had to fix).
+- Allowed read-only: `getMe`, `getChat`, `getChatMember*`, `getFile`.
+- Allowed only when the task is explicitly to mutate one message: `deleteMessage`,
+  `editMessageText`/`editMessageReplyMarkup`, `setMessageReaction`.
+- FORBIDDEN as a way to read: `forwardMessage`, `copyMessage`, `sendMessage`,
+  `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`, `sendMediaGroup`,
+  `pinChatMessage` — anything that puts or changes content.
+- You do **not** need to fetch the message a user replied to: the bot passes its
+  text/caption and any attached file path to you in the prompt already. Use that.
+- A bot cannot read the channel's history at all; if you need a specific channel
+  message that wasn't given to you, say so instead of improvising with the API.
+
 ## What management actions mean
 - **unsync** = remove the track from the platform's playlist AND set the relevant
   `{origin}_to_{platform}` row's `status` to `unsynced` (so the sync loops won't re-add it).

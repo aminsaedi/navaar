@@ -92,7 +92,18 @@ def _channel_msg(
     # A real text post has no photo; a photo post carries a list of sizes.
     msg.photo = [MagicMock(file_id="fid", file_unique_id="uid")] if photo else None
     msg.chat_id = -100
-    msg.reply_to_message = MagicMock(message_id=reply_to) if reply_to else None
+    if reply_to:
+        rt = MagicMock()
+        rt.message_id = reply_to
+        # A real replied-to message has these attributes, None when absent.
+        rt.text = None
+        rt.caption = None
+        rt.audio = None
+        rt.photo = None
+        rt.document = None
+        msg.reply_to_message = rt
+    else:
+        msg.reply_to_message = None
     msg.reply_text = AsyncMock()
     return msg
 
@@ -141,6 +152,34 @@ async def test_channel_photo_mention_downloads_image_for_agent() -> None:
     prompt = bot._agent.run.await_args.kwargs["message_text"]
     assert "[image saved at /tmp/navaar_photos/uid.jpg]" in prompt
     assert "what track is this?" in prompt
+
+
+@pytest.mark.asyncio
+async def test_channel_reply_context_hands_agent_the_replied_photo() -> None:
+    # The agent used to fetch the replied-to message itself with forwardMessage —
+    # which posts a copy into a chat and spammed the admin's DM. The bot must
+    # supply the replied-to content (text + image path) directly instead.
+    bot = _make_bot(sp_client=MagicMock())
+    bot._bot_username = "navbot"
+    bot._agent = MagicMock(enabled=True, run=AsyncMock(return_value="ok"))
+    bot._tracks = MagicMock(get_logical_track_by_message_id=AsyncMock(return_value=None))
+    msg = _channel_msg("@navbot add this one")
+    rt = MagicMock()
+    rt.message_id = 7
+    rt.text = None
+    rt.caption = "کم کم دارم برده دارا رو درک میکنم."
+    rt.audio = None
+    rt.photo = [MagicMock(file_id="fid", file_unique_id="uid")]
+    rt.document = None
+    msg.reply_to_message = rt
+    context = MagicMock()
+    context.bot.get_file = AsyncMock(
+        return_value=MagicMock(download_to_drive=AsyncMock())
+    )
+    await bot._handle_channel_command(MagicMock(channel_post=msg), context)
+    text = bot._agent.run.await_args.kwargs["message_text"]
+    assert "[replied-to image saved at /tmp/navaar_photos/uid.jpg]" in text
+    assert "کم کم دارم برده دارا رو درک میکنم." in text
 
 
 @pytest.mark.asyncio
