@@ -32,6 +32,7 @@ from navaar.db.repository import SyncLogRepository, SyncStateRepository, TrackRe
 from navaar.metrics import RETRIES_TOTAL, TRACKS_DISCOVERED
 from navaar.services import SVC_ICON, SVC_LABEL, is_sync_caption
 from navaar.sync.fanout import FanOut
+from navaar.telegram.voice_id import VoiceIdentifier
 
 if TYPE_CHECKING:
     from navaar.spotify.client import SpotifyClient
@@ -135,6 +136,7 @@ class NavaarBot:
         # Serializes vote removals: the audio message and its status card each
         # emit their own count update, and both can cross the threshold.
         self._vote_lock = asyncio.Lock()
+        self._voice_id: VoiceIdentifier | None = None
 
     def set_sync_engine(self, engine: SyncEngine) -> None:
         self._engine = engine
@@ -1644,6 +1646,13 @@ class NavaarBot:
         # Channel post handler
         self._app.add_handler(
             MessageHandler(filters.AUDIO & filters.UpdateType.CHANNEL_POST, self._handle_channel_post)
+        )
+        # Voice messages in the channel -> Shazam -> best YouTube match -> playlist.
+        self._voice_id = VoiceIdentifier(
+            self._app.bot, self._yt, self._tracks, self._log, self._channel_id
+        )
+        self._app.add_handler(
+            MessageHandler(filters.VOICE & filters.UpdateType.CHANNEL_POST, self._voice_id.handle)
         )
 
         # Natural-language control: text post in the channel (reply + @mention).

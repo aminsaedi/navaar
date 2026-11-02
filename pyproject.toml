@@ -30,6 +30,8 @@ dependencies = [
     "httpx>=0.27.0",
     "spotipy>=2.25.2,<3",
     "claude-agent-sdk>=0.2,<0.3",
+    # Song recognition for channel voice messages (unofficial Shazam client, no key).
+    "shazamio>=0.8,<1",
 ]
 
 [project.scripts]
