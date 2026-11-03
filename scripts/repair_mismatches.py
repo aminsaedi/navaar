@@ -263,7 +263,7 @@ async def main(apply: bool, limit_rows: int) -> None:
             await tracks.update_track(
                 row_id, status="failed", failure_reason="no_sp_match", sp_track_id=None
             )
-        if spid not in playlist_sp:
+        if spid and spid not in playlist_sp:
             try:
                 await asyncio.to_thread(sp.add_to_playlist, spid)
                 playlist_sp.add(spid)
