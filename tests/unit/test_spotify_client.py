@@ -49,9 +49,16 @@ def _sp_client(mock_spotify: MagicMock, tmp_path, search_items: list[dict]) -> S
     return SpotifyClient(playlist_id="pl123", cache_path=str(tmp_path / ".spotify_cache"))
 
 
-def _item(track_id: str, name: str, duration_ms: int) -> dict:
-    return {"id": track_id, "name": name, "artists": [{"name": "Dariush"}],
-            "duration_ms": duration_ms, "uri": f"spotify:track:{track_id}"}
+def _item(
+    track_id: str, name: str, duration_ms: int, artists: list[str] | None = None
+) -> dict:
+    return {
+        "id": track_id,
+        "name": name,
+        "artists": [{"name": a} for a in (artists or ["Dariush"])],
+        "duration_ms": duration_ms,
+        "uri": f"spotify:track:{track_id}",
+    }
 
 
 @patch("navaar.spotify.client.Spotify")
@@ -67,12 +74,12 @@ def test_find_best_match_rejects_wrong_length_and_wrong_title(
 
 
 @patch("navaar.spotify.client.Spotify")
-def test_find_best_match_keeps_long_live_version_with_matching_title(
+def test_find_best_match_rejects_different_length_recording(
     mock_spotify: MagicMock, tmp_path
 ) -> None:
+    """A 26-minute live take vs a 6-minute studio cut is a different recording."""
     client = _sp_client(mock_spotify, tmp_path, [_item("4QQ", "Shabe Meykhooneh", 400_000)])
-    match = client.find_best_match("Hayedeh", "Shabe Meykhooneh", 1589)
-    assert match is not None and match["id"] == "4QQ"
+    assert client.find_best_match("Hayedeh", "Shabe Meykhooneh", 1589) is None
 
 
 @patch("navaar.spotify.client.Spotify")
@@ -82,17 +89,45 @@ def test_find_best_match_skips_to_the_plausible_candidate(
     client = _sp_client(
         mock_spotify,
         tmp_path,
-        [_item("bad", "Something Else Entirely", 20_000), _item("good", "Mordab", 291_000)],
+        [
+            _item("bad", "Something Else Entirely", 20_000, ["Googoosh"]),
+            _item("good", "Mordab", 291_000, ["Googoosh"]),
+        ],
     )
     match = client.find_best_match("Googoosh", "Mordab", 295)
     assert match is not None and match["id"] == "good"
 
 
 @patch("navaar.spotify.client.Spotify")
-def test_find_best_match_without_source_duration_takes_top_hit(
+def test_find_best_match_without_source_duration_uses_title_and_artist(
     mock_spotify: MagicMock, tmp_path
 ) -> None:
-    """yt→sp stores no duration — behaviour there must be unchanged."""
-    client = _sp_client(mock_spotify, tmp_path, [_item("top", "Whatever", 200_000)])
-    match = client.find_best_match("A", "Unrelated Title")
-    assert match is not None and match["id"] == "top"
+    """y→sp now always has a duration, but the voice flow does not: without one,
+    identity still has to be proven by title and artist."""
+    client = _sp_client(
+        mock_spotify,
+        tmp_path,
+        [
+            _item("wrong", "Totally Unrelated Song", 200_000, ["Somebody Else"]),
+            _item("right", "Nazanin", 317_000, ["Dariush"]),
+        ],
+    )
+    match = client.find_best_match("Dariush", "Nazanin")
+    assert match is not None and match["id"] == "right"
+
+
+@patch("navaar.spotify.client.Spotify")
+def test_find_best_match_prefers_exact_recording_over_same_title_cover(
+    mock_spotify: MagicMock, tmp_path
+) -> None:
+    """A different artist's same-title track must never win."""
+    client = _sp_client(
+        mock_spotify,
+        tmp_path,
+        [
+            _item("cover", "Leila", 186_000, ["Eljaan"]),
+            _item("real", "Leila", 181_000, ["Sijal", "Sogand"]),
+        ],
+    )
+    match = client.find_best_match("Sijal", "Leila", 181)
+    assert match is not None and match["id"] == "real"

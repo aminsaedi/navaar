@@ -10,7 +10,7 @@ import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from navaar.auth_errors import retry_if_transient
-from navaar.matching import is_plausible_match, parse_iso8601_duration
+from navaar.matching import build_queries, parse_iso8601_duration, score_candidate
 from navaar.metrics import AUTH_ERRORS
 
 logger = structlog.get_logger()
@@ -192,6 +192,16 @@ class YTMusicClient:
             if not page_token:
                 break
 
+        # playlistItems does not return duration, but the fan-out to Spotify needs
+        # it to verify it is the same recording (a title-only match lets a cover
+        # take the slot). One videos.list call per 50 ids.
+        video_ids = [t["videoId"] for t in tracks if t.get("videoId")]
+        durations: dict[str, int] = {}
+        for i in range(0, len(video_ids), 50):
+            durations.update(self._fetch_durations(video_ids[i : i + 50]))
+        for track in tracks:
+            track["duration_seconds"] = durations.get(track["videoId"])
+
         logger.debug("yt_playlist_fetched", track_count=len(tracks))
         return tracks
 
@@ -247,31 +257,57 @@ class YTMusicClient:
     def find_best_match(
         self, artist: str | None, title: str, duration_seconds: int | None = None
     ) -> dict | None:
-        query = f"{artist} {title}" if artist else title
-        # Only pay for the duration lookup when there is a source duration to
-        # compare it against (yt→sp has none).
-        results = self.search_song(query, with_duration=duration_seconds is not None)
-        if not results:
-            return None
+        """Best same-recording YouTube hit, verified on title + artist + duration.
 
-        for candidate in results:
-            if is_plausible_match(
-                title, duration_seconds, candidate.get("title"), candidate.get("duration_seconds")
-            ):
+        YouTube's candidate "artist" is the uploader channel, so the real artist
+        often only appears in the title; ``score_candidate`` accepts either. The
+        first query is the cheapest/specific one; the fallbacks run only when it
+        yields no acceptable match, keeping search quota low in steady state.
+        """
+        queries = build_queries(artist, title)
+        rejected: list[tuple[str | None, int | None]] = []
+        tried: list[str] = []
+
+        for query in queries[:3]:
+            tried.append(query)
+            results = self.search_song(query, limit=10, with_duration=True)
+            scored: list[tuple[float, int, dict]] = []
+            for candidate in results:
+                candidate_seconds = candidate.get("duration_seconds")
+                score = score_candidate(
+                    title,
+                    duration_seconds,
+                    candidate.get("title"),
+                    candidate_seconds,
+                    source_artist=artist,
+                    candidate_artists=[
+                        a.get("name") for a in candidate.get("artists", [])
+                    ],
+                )
+                if score is None:
+                    rejected.append((candidate.get("title"), candidate_seconds))
+                    continue
+                diff = abs((candidate_seconds or 0) - (duration_seconds or 0))
+                scored.append((score, -diff, candidate))
+
+            if scored:
+                scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                best = scored[0][2]
                 logger.info(
                     "yt_best_match",
-                    query=query,
-                    video_id=candidate.get("videoId"),
-                    match_title=candidate.get("title"),
+                    queries=tried,
+                    video_id=best.get("videoId"),
+                    match_title=best.get("title"),
+                    score=round(scored[0][0], 3),
                 )
-                return candidate
+                return best
 
-        # Every hit was a different work — search always returns *something*, so
-        # this is the "not on YouTube" case, not a reason to take the top hit.
+        # Search always returns *something*; every hit being a different work
+        # means the track is not on YouTube, so report that instead of the top hit.
         logger.info(
             "yt_no_plausible_match",
-            query=query,
+            queries=tried,
             duration_seconds=duration_seconds,
-            rejected=[(r.get("title"), r.get("duration_seconds")) for r in results],
+            rejected=rejected[:10],
         )
         return None

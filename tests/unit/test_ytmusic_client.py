@@ -127,25 +127,58 @@ def test_find_best_match_skips_bad_candidate_for_good_one(
     assert match is not None and match["videoId"] == "good"
 
 
-def test_no_duration_lookup_without_source_duration(
+def test_find_best_match_prefers_album_length_over_short_music_video(
     fresh_client: YTMusicClient, monkeypatch
 ) -> None:
-    """yt→sp has no duration: skip the extra quota call and keep the top hit."""
-    calls: list[str] = []
-    _stub_httpx(monkeypatch, _search_payload(("top", "Whatever")), _videos_payload(), calls)
-    match = fresh_client.find_best_match("A", "Unrelated Title")
-    assert match is not None and match["videoId"] == "top"
-    assert not any(u.endswith("/videos") for u in calls)
+    """The official video (4:17) is a different edit of the 7:47 album track."""
+    _stub_httpx(
+        monkeypatch,
+        _search_payload(
+            ("video", "Tame Impala - Let It Happen (Official Video)"),
+            ("album", "Tame Impala - Let It Happen (Official Audio)"),
+        ),
+        _videos_payload(("video", "PT4M17S"), ("album", "PT7M55S")),
+    )
+    match = fresh_client.find_best_match("Tame Impala", "Let It Happen", 471)
+    assert match is not None and match["videoId"] == "album"
+
+
+def test_find_best_match_rejects_same_title_live_take(
+    fresh_client: YTMusicClient, monkeypatch
+) -> None:
+    """A live duet of the same song is not the 6-minute studio recording."""
+    _stub_httpx(
+        monkeypatch,
+        _search_payload(("live", "Dariush: Ay Eshgh (Featuring Faramarz Aslani)")),
+        _videos_payload(("live", "PT4M3S")),
+    )
+    assert fresh_client.find_best_match("Dariush", "Ay Eshgh", 369) is None
+
+
+def test_find_best_match_without_source_duration_verifies_title_and_artist(
+    fresh_client: YTMusicClient, monkeypatch
+) -> None:
+    """The voice flow passes no duration; identity still has to be proven."""
+    _stub_httpx(
+        monkeypatch,
+        _search_payload(
+            ("wrong", "Somebody Else - Totally Unrelated"),
+            ("right", "Dariush - Nazanin"),
+        ),
+        _videos_payload(("wrong", "PT3M0S"), ("right", "PT5M17S")),
+    )
+    match = fresh_client.find_best_match("Dariush", "Nazanin")
+    assert match is not None and match["videoId"] == "right"
 
 
 def test_duration_lookup_failure_does_not_break_search(
     fresh_client: YTMusicClient, monkeypatch
 ) -> None:
-    """Losing the duration signal must degrade to the old behaviour, not fail."""
+    """Losing the duration signal must fall back to title+artist, not fail."""
     def fake_get(url: str, **kwargs):
         if url.endswith("/videos"):
             raise RuntimeError("quota exceeded")
-        return _Resp(_search_payload(("vid1", "Akharin Talash")))
+        return _Resp(_search_payload(("vid1", "Sattar - Akharin Talash")))
 
     monkeypatch.setattr("navaar.ytmusic.client.httpx.get", fake_get)
     match = fresh_client.find_best_match("Sattar", "Akharin Talash", 265)

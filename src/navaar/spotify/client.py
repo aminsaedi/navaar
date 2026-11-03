@@ -6,7 +6,7 @@ from spotipy.oauth2 import SpotifyOAuth, SpotifyPKCE
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from navaar.auth_errors import retry_if_transient
-from navaar.matching import is_plausible_match
+from navaar.matching import build_queries, score_candidate
 
 logger = structlog.get_logger()
 
@@ -112,30 +112,59 @@ class SpotifyClient:
     def find_best_match(
         self, artist: str | None, title: str, duration_seconds: int | None = None
     ) -> dict | None:
-        query = f"{artist} {title}" if artist else title
-        results = self.search_track(query)
-        if not results:
+        """Best same-recording match, verified on title + artist + duration.
+
+        Several query shapes are tried because search ranks by popularity, not
+        by identity: the exact song can sit below covers by famous artists. Every
+        unique hit is scored; the highest score wins, and a candidate that fails
+        any of the three signals is never returned.
+        """
+        queries = build_queries(artist, title)
+        candidates: dict[str, dict] = {}
+        for query in queries:
+            for candidate in self.search_track(query, limit=15):
+                candidates.setdefault(candidate["id"], candidate)
+        if not candidates:
             return None
 
-        for candidate in results:
+        best: dict | None = None
+        best_key: tuple[float, int] | None = None
+        rejected: list[tuple[str, int | None]] = []
+        for candidate in candidates.values():
             ms = candidate.get("duration_ms")
-            if is_plausible_match(
-                title, duration_seconds, candidate.get("name"), round(ms / 1000) if ms else None
-            ):
-                logger.info(
-                    "sp_best_match",
-                    query=query,
-                    track_id=candidate.get("id"),
-                    match_name=candidate.get("name"),
-                )
-                return candidate
+            candidate_seconds = round(ms / 1000) if ms else None
+            score = score_candidate(
+                title,
+                duration_seconds,
+                candidate.get("name"),
+                candidate_seconds,
+                source_artist=artist,
+                candidate_artists=candidate.get("artists"),
+            )
+            if score is None:
+                rejected.append((candidate.get("name"), candidate_seconds))
+                continue
+            # Prefer the closer length when two candidates score equally.
+            diff = abs((candidate_seconds or 0) - (duration_seconds or 0))
+            key = (score, -diff)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = candidate
 
-        # Search always returns *something*; every hit being a different work means
-        # the track is not on Spotify, so report that instead of the top hit.
+        if best is None:
+            logger.info(
+                "sp_no_plausible_match",
+                queries=queries,
+                duration_seconds=duration_seconds,
+                rejected=rejected[:10],
+            )
+            return None
+
         logger.info(
-            "sp_no_plausible_match",
-            query=query,
-            duration_seconds=duration_seconds,
-            rejected=[(r.get("name"), r.get("duration_ms")) for r in results],
+            "sp_best_match",
+            queries=queries,
+            track_id=best.get("id"),
+            match_name=best.get("name"),
+            score=round(best_key[0], 3) if best_key else None,
         )
-        return None
+        return best
