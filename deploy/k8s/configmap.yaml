@@ -10,7 +10,9 @@ data:
   NAVAAR_YTMUSIC_PLAYLIST_ID: "PLuiEUR-229Ow9l3QVvnER7F1cHDmuFHRE"
   NAVAAR_YTMUSIC_AUTH_FILE: "/data/oauth.json"
   NAVAAR_SYNC_INTERVAL_TG_TO_YT: "60"
-  NAVAAR_SYNC_INTERVAL_YT_TO_TG: "120"
+  # Each poll reads every playlist page (~1 YouTube quota unit per 50 tracks); at
+  # 120 s that was ~4.3k of the 10k units/day, starving inserts after a bulk post.
+  NAVAAR_SYNC_INTERVAL_YT_TO_TG: "300"
   NAVAAR_MAX_RETRIES: "3"
   NAVAAR_DATABASE_URL: "sqlite+aiosqlite:////data/navaar.db"
   NAVAAR_API_PORT: "8080"
