@@ -82,6 +82,11 @@ modules (e.g. `tg_to_yt.py`) are ~20 lines: they set class attributes and wire c
   keys, db field, no-match reason, search metrics. Subclasses set `direction`, `target`,
   and `identify_from_telegram` (tg_* download+identify the audio first).
 - Fetch pending tracks from DB → identify/search → add to target service → mark synced/failed
+- **Preset target id**: a pending row that already has the target's id (`yt_video_id` / `sp_track_id`)
+  skips identification and search and is added as-is (a retry after the add itself failed, or an
+  operator repair that resolved the song from its audio — re-reading a mislabeled file's tags would
+  undo the fix, and YouTube allows only 100 searches/day). The playlist snapshot taken at cycle start
+  is updated after each add, so two copies of a song in one cycle add the entry once.
 
 **Pull-based** (`process_new_tracks()`): yt_to_tg, sp_to_tg
 - `BasePullSync` (`sync/_base_pull.py`) holds the retry-then-snapshot-diff skeleton plus the

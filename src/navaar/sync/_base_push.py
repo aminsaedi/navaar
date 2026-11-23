@@ -130,19 +130,32 @@ class BasePushSync:
         start = time.monotonic()
         t = self.target
 
-        if self.identify_from_telegram:
-            track = await self._identify_from_telegram(track)
-        else:
+        preset = getattr(track, t.db_field, None)
+        if preset:
+            # The target id is already known and verified (a retry after the add
+            # itself failed, or an operator repair that resolved the song from its
+            # audio). Re-identifying would re-read the file's tags — wrong on
+            # mislabeled files — and searching again spends quota (YouTube allows
+            # 100 searches/day) and may pick a different entry. Just add it.
             await self._tracks.update_track(track.id, status="searching")
             track = await self._tracks.get_track(track.id)
-        if track is None:
-            return  # purged while identifying
+            if track is None:
+                return
+            match = {t.match_id_key: preset, t.match_name_key: track.title}
+        else:
+            if self.identify_from_telegram:
+                track = await self._identify_from_telegram(track)
+            else:
+                await self._tracks.update_track(track.id, status="searching")
+                track = await self._tracks.get_track(track.id)
+            if track is None:
+                return  # purged while identifying
 
-        search_start = time.monotonic()
-        match = await asyncio.to_thread(
-            self._target.find_best_match, track.artist, track.title, track.duration_seconds
-        )
-        t.search_duration.observe(time.monotonic() - search_start)
+            search_start = time.monotonic()
+            match = await asyncio.to_thread(
+                self._target.find_best_match, track.artist, track.title, track.duration_seconds
+            )
+            t.search_duration.observe(time.monotonic() - search_start)
 
         if not match:
             await self._tracks.mark_failed(track.id, t.no_match_reason)

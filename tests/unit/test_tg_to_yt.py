@@ -257,3 +257,29 @@ async def test_same_video_twice_in_one_cycle_is_added_once(
     assert mock_yt_client.add_to_playlist.call_count == 1
     statuses = sorted(t.status for t in await track_repo.get_pending_tracks("tg_to_yt")) or []
     assert statuses == []  # both resolved: one synced, one duplicate
+
+
+@pytest.mark.asyncio
+async def test_preset_video_id_skips_identify_and_search(
+    track_repo: TrackRepository,
+    sync_log_repo: SyncLogRepository,
+    mock_tg_client: MagicMock,
+    mock_yt_client: MagicMock,
+) -> None:
+    """A pending row that already carries a verified video id (repair, or a retry
+    after the add failed) is added as-is: re-reading a mislabeled file's tags or
+    searching again would undo the fix and spend search quota."""
+    track = await track_repo.create_track(
+        direction="tg_to_yt", status="pending", title="Deevar", artist="Dariush",
+        tg_file_id="file_x", yt_video_id="kRaP8M69y3w",
+    )
+    with patch("navaar.sync._base_push.identify_track") as mock_identify:
+        sync = TgToYtSync(track_repo, sync_log_repo, mock_tg_client, mock_yt_client)
+        assert await sync.process_pending() == 1
+        mock_identify.assert_not_called()
+
+    mock_tg_client.download_file.assert_not_called()
+    mock_yt_client.find_best_match.assert_not_called()
+    mock_yt_client.add_to_playlist.assert_called_once_with("kRaP8M69y3w")
+    updated = await track_repo.get_track(track.id)
+    assert updated.status == "synced" and updated.title == "Deevar"
