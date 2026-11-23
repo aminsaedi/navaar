@@ -178,6 +178,11 @@ class BasePushSync:
         # otherwise causes a duplicate re-upload (the row has no id to match on yet).
         await self._tracks.update_track(track.id, status="syncing", **{t.db_field: ext_id})
         await asyncio.to_thread(self._target.add_to_playlist, ext_id)
+        # The playlist snapshot is fetched once per cycle. Record the add in it, or a
+        # second track matching the same entry later in this cycle sees it missing and
+        # adds it again. That is how a bulk post put the same video/track into the
+        # playlists twice (2026-11-22).
+        playlist_tracks.append({t.match_id_key: ext_id})
 
         if await self._tracks.mark_synced(track.id, **{t.db_field: ext_id}) is None:
             # The row was purged mid-flight (/delete or a dislike vote ran while we

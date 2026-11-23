@@ -223,3 +223,37 @@ async def test_quota_exhausted_on_playlist_fetch_pauses_without_crashing(
     assert await sync.process_pending() == 0
     assert mock_yt_client.get_playlist_tracks.call_count == 1
     mock_yt_client.find_best_match.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_same_video_twice_in_one_cycle_is_added_once(
+    track_repo: TrackRepository,
+    sync_log_repo: SyncLogRepository,
+    mock_tg_client: MagicMock,
+    mock_yt_client: MagicMock,
+) -> None:
+    """The playlist snapshot is fetched once per cycle; a bulk post with the same
+    song twice must not add the same video to the playlist twice."""
+    from navaar.ytmusic.client import YTMusicClient
+
+    for i in range(2):
+        await track_repo.create_track(
+            direction="tg_to_yt", status="pending", title="Tarikhe Eshgh",
+            artist="Hayedeh", tg_file_id=f"file_{i}",
+        )
+    mock_yt_client.find_best_match = MagicMock(return_value={"videoId": "7FEQ", "title": "x"})
+    # Real membership check against the cycle's snapshot.
+    mock_yt_client.is_in_playlist = lambda vid, tracks: YTMusicClient.is_in_playlist(
+        None, vid, tracks
+    )
+
+    with patch("navaar.sync._base_push.identify_track") as mock_identify:
+        mock_identify.return_value = MagicMock(
+            artist="Hayedeh", title="Tarikhe Eshgh", method="id3"
+        )
+        sync = TgToYtSync(track_repo, sync_log_repo, mock_tg_client, mock_yt_client)
+        await sync.process_pending()
+
+    assert mock_yt_client.add_to_playlist.call_count == 1
+    statuses = sorted(t.status for t in await track_repo.get_pending_tracks("tg_to_yt")) or []
+    assert statuses == []  # both resolved: one synced, one duplicate

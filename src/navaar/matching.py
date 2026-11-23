@@ -262,6 +262,11 @@ def duration_plausible(source_seconds: int | None, candidate_seconds: int | None
     return score is None or score > 0
 
 
+# A different title is only accepted on a length match this tight (plus the same
+# artist): a long programme and a mix of the same material, not two songs.
+_EXACT_LENGTH_SECONDS = 2
+
+
 def duration_score(source_seconds: int | None, candidate_seconds: int | None) -> float | None:
     """1.0 for a near-exact length, falling to 0 beyond 25%. None = unknown.
 
@@ -380,8 +385,12 @@ def score_candidate(
     if title < 0.5:
         # Uninformative titles exist ("51 minutes with Dariush" vs "DARIUSH
         # CLASSIC MIX"), but an exact-to-the-second length plus the same artist
-        # is strong evidence. Anything less still needs the title.
-        if duration != 1.0:
+        # is strong evidence. Anything less still needs the title. It must be
+        # genuinely exact: duration_score's 1.0 band is ±8 s, and within one
+        # artist's catalogue another song is often that close, which put
+        # "To Baroon Keh Rafty" → "Baazi", "Parandehe Mohajer" → "Khasteh Shodam"
+        # and "The Lom" → "Khune" into the Spotify playlist.
+        if abs((source_seconds or 0) - (candidate_seconds or 0)) > _EXACT_LENGTH_SECONDS:
             return None
         title = 0.5
     if duration is None and title < 0.8:

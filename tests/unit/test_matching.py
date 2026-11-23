@@ -257,3 +257,17 @@ def test_exact_duration_rescues_uninformative_title() -> None:
         "۵۱دقیقه همراه با داریوش", 3089, "DARIUSH CLASSIC MIX", 3090,
         source_artist="Someone Else", candidate_artists=["Caltex Records"],
     )
+
+
+def test_near_length_does_not_rescue_a_different_song_by_the_same_artist() -> None:
+    # Production mismatches on 2026-11-22: a different song by the same artist,
+    # within the ±8 s "near-exact" band, was accepted despite an unrelated title.
+    for title, secs, wrong, wrong_secs in (
+        ("To Baroon Keh Rafty", 234, "Baazi", 230),
+        ("Parandehe Mohajer", 244, "Khasteh Shodam", 241),
+        ("The Lom", 219, "Khune", 216),
+    ):
+        assert not is_plausible_match(
+            title, secs, wrong, wrong_secs,
+            source_artist="Siavash Ghomayshi", candidate_artists=["Siavash Ghomayshi"],
+        ), (title, wrong)
