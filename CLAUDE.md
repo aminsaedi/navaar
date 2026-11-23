@@ -291,8 +291,10 @@ spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
     post therefore drains a day's quota at a time instead of burning every remaining track to
     `failed` (failed rows are never retried automatically). The pause is in-memory (a restart
     costs one refused call to re-learn it).
-  - **Pull directions** crash to the engine as before, alerting "⏳ API QUOTA EXHAUSTED" once per
-    incident (no 30-minute "still failing" reminders — it only clears at the reset; the
+  - **Pull directions** (`BasePullSync`): a quota error on the playlist fetch pauses the diff
+    the same way (no crash, no alert, `/readyz` stays green); nothing is lost, the first diff
+    after the reset sees every new id. A quota error that still reaches the engine (any other
+    path) alerts "⏳ API QUOTA EXHAUSTED" once per incident (no 30-minute reminders; the
     signature drops the URL query so varying page tokens don't re-alert), then "recovered".
   - **YouTube limits for the project** (`n8n-integration-456918`, default, readable via the
     Service Usage API): **10,000 units/day** and, separately, **100 `search.list` calls/day**

@@ -6,6 +6,7 @@ import time
 
 import structlog
 
+from navaar.auth_errors import is_quota_error, quota_retry_after
 from navaar.db.repository import SyncLogRepository, SyncStateRepository, TrackRepository
 from navaar.metrics import (
     SYNC_ERRORS,
@@ -49,6 +50,8 @@ class BasePullSync:
         self._tg = tg_client
         self._dl = downloader
         self._card = None
+        # Wall-clock time before which the playlist service's API quota is known spent.
+        self._quota_paused_until = 0.0
 
     # Subclasses set this to the client whose get_playlist_tracks() is diffed.
     _playlist_client: object
@@ -76,7 +79,22 @@ class BasePullSync:
                 SYNC_ERRORS.labels(direction=self.direction, error_type="retry_failed").inc()
 
         # Part 2: diff the playlist against the stored snapshot.
-        playlist_tracks = await asyncio.to_thread(self._playlist_client.get_playlist_tracks)
+        if time.time() < self._quota_paused_until:
+            return synced
+        try:
+            playlist_tracks = await asyncio.to_thread(self._playlist_client.get_playlist_tracks)
+        except Exception as exc:
+            if not is_quota_error(exc):
+                raise
+            # The API quota is spent until its reset (YouTube: midnight Pacific).
+            # Polling only repeats the refusal, and crashing would alert and flip
+            # /readyz for hours over something that heals itself. Skip the diff until
+            # then; nothing is lost, the next diff after the reset sees everything.
+            wait = quota_retry_after(exc)
+            self._quota_paused_until = time.time() + wait
+            SYNC_ERRORS.labels(direction=self.direction, error_type="quota").inc()
+            logger.warning(f"{self.direction}_quota_paused", resume_in_minutes=round(wait / 60))
+            return synced
         current_ids = [t[self.id_key] for t in playlist_tracks if t.get(self.id_key)]
 
         prev_snapshot = await self._state.get_json(self.snapshot_key)

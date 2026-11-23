@@ -230,3 +230,26 @@ async def test_error_before_row_creation_is_not_snapshotted(
     recovered = await track_repo.get_track_by_yt_video_id("vid2")
     assert recovered is not None and recovered.status == "synced"
     assert await sync_state_repo.get_json("yt_playlist_snapshot") == ["vid1", "vid2"]
+
+
+@pytest.mark.asyncio
+async def test_quota_exhausted_playlist_fetch_pauses_quietly(
+    track_repo, sync_log_repo, sync_state_repo, mock_yt_client, mock_tg_client, mock_downloader
+) -> None:
+    """A spent YouTube quota must not crash the pull loop (alert + /readyz flip for
+    hours); it pauses until the reset and makes no further calls meanwhile."""
+    import httpx
+
+    req = httpx.Request("GET", "https://www.googleapis.com/youtube/v3/playlistItems")
+    resp = httpx.Response(403, request=req, json={"error": {"errors": [{"reason": "quotaExceeded"}]}})
+    mock_yt_client.get_playlist_tracks = MagicMock(
+        side_effect=httpx.HTTPStatusError("403", request=req, response=resp)
+    )
+    await sync_state_repo.set_json("yt_playlist_snapshot", ["vid1"])
+    sync = YtToTgSync(
+        track_repo, sync_state_repo, sync_log_repo,
+        mock_tg_client, mock_yt_client, mock_downloader,
+    )
+    assert await sync.process_new_tracks() == 0
+    assert await sync.process_new_tracks() == 0
+    assert mock_yt_client.get_playlist_tracks.call_count == 1
