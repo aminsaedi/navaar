@@ -85,7 +85,10 @@ spec:
               memory: 256Mi
             limits:
               cpu: "1"
-              memory: 512Mi
+              # 512Mi was OOMKilled during a 357-song bulk post (2026-11-22): several
+              # sync loops + library ffmpeg + yt-dlp subprocesses, and the in-pod
+              # Claude agent, all share this cgroup.
+              memory: 1Gi
       volumes:
         - name: data
           persistentVolumeClaim:

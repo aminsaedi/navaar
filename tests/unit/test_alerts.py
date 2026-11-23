@@ -86,3 +86,57 @@ async def test_send_failure_never_raises():
     n = AlertNotifier(bot, chat_id=123, consecutive_threshold=1)
     # Must not propagate — the alert path cannot become a second exception.
     await n.record_crash("sp_to_tg", RuntimeError("boom"))
+
+
+def _quota_exc() -> httpx.HTTPStatusError:
+    req = httpx.Request("GET", "https://www.googleapis.com/youtube/v3/playlistItems")
+    resp = httpx.Response(
+        403, request=req, json={"error": {"errors": [{"reason": "quotaExceeded"}]}}
+    )
+    return httpx.HTTPStatusError("Client error '403 Forbidden'", request=req, response=resp)
+
+
+@pytest.mark.asyncio
+async def test_quota_exhaustion_is_not_reported_as_auth_failure():
+    bot = _bot()
+    n = AlertNotifier(bot, chat_id=123, consecutive_threshold=2)
+
+    await n.record_crash("yt_to_tg", _quota_exc())
+    bot.send_message.assert_not_called()  # not escalated like a revoked token
+
+    await n.record_crash("yt_to_tg", _quota_exc())
+    text = bot.send_message.call_args.kwargs["text"]
+    assert "QUOTA" in text
+    assert "AUTH" not in text and "re-auth required" not in text
+
+
+@pytest.mark.asyncio
+async def test_quota_incident_alerts_once_then_recovers(monkeypatch):
+    """Overnight, a spent YouTube quota sent a 'STILL FAILING' reminder every 30
+    minutes until the reset. One alert + one 'recovered' is the whole story."""
+    import navaar.telegram.alerts as alerts_mod
+
+    bot = _bot()
+    n = AlertNotifier(bot, chat_id=123, consecutive_threshold=1, cooldown_seconds=1800)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(alerts_mod.time, "time", lambda: clock[0])
+
+    for page in range(12):  # six hours of 30-minute backoff crashes
+        req = httpx.Request(
+            "GET",
+            f"https://www.googleapis.com/youtube/v3/playlistItems?pageToken=p{page}",
+        )
+        resp = httpx.Response(
+            403, request=req, json={"error": {"errors": [{"reason": "quotaExceeded"}]}}
+        )
+        await n.record_crash(
+            "yt_to_tg", httpx.HTTPStatusError("403", request=req, response=resp)
+        )
+        clock[0] += 1900
+
+    assert bot.send_message.await_count == 1
+    assert "QUOTA" in bot.send_message.call_args.kwargs["text"]
+
+    await n.record_success("yt_to_tg")
+    assert bot.send_message.await_count == 2
+    assert "recovered" in bot.send_message.call_args.kwargs["text"]

@@ -217,7 +217,7 @@ def init_metrics(
         TRACK_SYNC_DURATION.labels(direction=direction)
 
     for error_type in ("no_yt_match", "no_sp_match", "unexpected", "cycle_crash",
-                        "auth_error", "sync_failed", "retry_failed",
+                        "auth_error", "quota", "sync_failed", "retry_failed",
                         "download_failed", "upload_failed"):
         for direction in ALL_DIRECTIONS:
             SYNC_ERRORS.labels(direction=direction, error_type=error_type)

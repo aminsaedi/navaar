@@ -183,3 +183,28 @@ def test_duration_lookup_failure_does_not_break_search(
     monkeypatch.setattr("navaar.ytmusic.client.httpx.get", fake_get)
     match = fresh_client.find_best_match("Sattar", "Akharin Talash", 265)
     assert match is not None and match["videoId"] == "vid1"
+
+
+def test_playlist_poll_fetches_each_duration_once(
+    fresh_client: YTMusicClient, monkeypatch
+) -> None:
+    """Durations never change, so the 2-minute playlist poll must not spend a
+    videos.list call per 50 ids on every cycle — only for ids it hasn't seen."""
+    playlist = {
+        "items": [
+            {
+                "id": "set1",
+                "snippet": {"title": "Song", "resourceId": {"videoId": "vid1"}},
+            }
+        ]
+    }
+    calls: list[str] = []
+    _stub_httpx(monkeypatch, search=playlist, videos=_videos_payload(("vid1", "PT4M25S")), calls=calls)
+
+    first = fresh_client.get_playlist_tracks()
+    second = fresh_client.get_playlist_tracks()
+
+    assert first[0]["duration_seconds"] == 265
+    assert second[0]["duration_seconds"] == 265
+    assert sum(url.endswith("/videos") for url in calls) == 1
+    assert sum(url.endswith("/playlistItems") for url in calls) == 2

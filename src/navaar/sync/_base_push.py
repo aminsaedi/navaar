@@ -5,6 +5,7 @@ import time
 
 import structlog
 
+from navaar.auth_errors import is_quota_error, quota_retry_after
 from navaar.db.repository import SyncLogRepository, TrackRepository
 from navaar.metrics import (
     DUPLICATES_SKIPPED,
@@ -45,6 +46,8 @@ class BasePushSync:
         self._target = target_client
         self._tg = tg_client
         self._card = None
+        # Wall-clock time before which the target's API quota is known to be spent.
+        self._quota_paused_until = 0.0
 
     def set_card_service(self, card_service: object) -> None:
         self._card = card_service
@@ -57,18 +60,42 @@ class BasePushSync:
         pending = await self._tracks.get_pending_tracks(self.direction)
         if not pending:
             return 0
+        if time.time() < self._quota_paused_until:
+            # The target's quota is spent until its reset: don't spend a playlist
+            # fetch and a refused call per cycle finding that out again. The cycle
+            # still completes, so /readyz stays green and nothing alerts.
+            return 0
 
         logger.info(f"{self.direction}_processing", count=len(pending))
         processed = 0
         # Blocking client call off the event loop. A permanent auth failure here
         # propagates to the engine (the systemic-failure path) by design.
-        playlist_tracks = await asyncio.to_thread(self._target.get_playlist_tracks)
+        try:
+            playlist_tracks = await asyncio.to_thread(self._target.get_playlist_tracks)
+        except Exception as exc:
+            if is_quota_error(exc):
+                self._pause_for_quota(exc, track_id=None, processed=0, left=len(pending))
+                return 0
+            raise
 
-        for track in pending:
+        for idx, track in enumerate(pending):
             try:
                 await self._process_track(track, playlist_tracks)
                 processed += 1
-            except Exception:
+            except Exception as exc:
+                if is_quota_error(exc):
+                    # The target API's quota is spent (YouTube: 10k units/day, and
+                    # only 100 search calls/day): this track and every one after it
+                    # would fail identically. Burning them all to "failed" is what
+                    # stranded 248 tracks after a 357-song bulk post (failed rows are
+                    # never retried automatically). Put this one back to pending,
+                    # leave the rest queued, and pause until the quota resets — the
+                    # backlog then drains by itself, a day's quota at a time.
+                    await self._tracks.update_track(track.id, status="pending")
+                    self._pause_for_quota(
+                        exc, track_id=track.id, processed=processed, left=len(pending) - idx
+                    )
+                    break
                 logger.error(f"{self.direction}_track_error", track_id=track.id, exc_info=True)
                 await self._tracks.mark_failed(track.id, "unexpected_error")
                 await self._log.log(
@@ -83,6 +110,21 @@ class BasePushSync:
                 await self._emit_card(track.id)
 
         return processed
+
+    def _pause_for_quota(
+        self, exc: BaseException, *, track_id: int | None, processed: int, left: int
+    ) -> None:
+        wait = quota_retry_after(exc)
+        self._quota_paused_until = time.time() + wait
+        SYNC_ERRORS.labels(direction=self.direction, error_type="quota").inc()
+        logger.warning(
+            f"{self.direction}_quota_paused",
+            track_id=track_id,
+            processed=processed,
+            left_pending=left,
+            resume_in_minutes=round(wait / 60),
+            error=str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__,
+        )
 
     async def _process_track(self, track, playlist_tracks: list[dict]) -> None:
         start = time.monotonic()

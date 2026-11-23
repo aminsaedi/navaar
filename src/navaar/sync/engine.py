@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import structlog
 
-from navaar.auth_errors import classify_auth_service
+from navaar.auth_errors import classify_auth_service, is_quota_error
 from navaar.db.repository import SyncStateRepository, TrackRepository
 from navaar.metrics import (
     ALL_DIRECTIONS,
@@ -140,7 +140,9 @@ class SyncEngine:
         SYNC_CYCLE_CRASHES.labels(direction=direction).inc()
 
         service = classify_auth_service(exc)
-        if service is not None:
+        if is_quota_error(exc):
+            SYNC_ERRORS.labels(direction=direction, error_type="quota").inc()
+        elif service is not None:
             AUTH_ERRORS.labels(service=service).inc()
             SYNC_ERRORS.labels(direction=direction, error_type="auth_error").inc()
         else:

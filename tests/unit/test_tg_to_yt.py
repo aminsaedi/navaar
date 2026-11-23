@@ -151,3 +151,75 @@ async def test_process_pending_file_too_big_falls_back_to_metadata(
     assert updated.yt_video_id == "abc123"
     # Identified without the bytes, so no local file to clean up.
     mock_tg_client.cleanup.assert_not_called()
+
+
+def _quota_exc():
+    import httpx
+
+    req = httpx.Request("GET", "https://www.googleapis.com/youtube/v3/search")
+    resp = httpx.Response(
+        403, request=req, json={"error": {"errors": [{"reason": "quotaExceeded"}]}}
+    )
+    return httpx.HTTPStatusError("Client error '403 Forbidden'", request=req, response=resp)
+
+
+@pytest.mark.asyncio
+async def test_quota_exhaustion_leaves_tracks_pending_and_pauses(
+    track_repo: TrackRepository,
+    sync_log_repo: SyncLogRepository,
+    mock_tg_client: MagicMock,
+    mock_yt_client: MagicMock,
+) -> None:
+    """A bulk post that runs the YouTube quota dry must not burn every remaining
+    track to 'failed' (failed rows are never retried automatically). The cycle
+    stops, the tracks stay pending, and later cycles make no API calls until the
+    quota resets — the cycle still completes, so nothing crash-loops or alerts."""
+    ids = [
+        (
+            await track_repo.create_track(
+                direction="tg_to_yt", status="pending", title=f"Song {i}",
+                artist="Artist", tg_file_id=f"file_{i}",
+            )
+        ).id
+        for i in range(3)
+    ]
+    mock_yt_client.find_best_match = MagicMock(side_effect=_quota_exc())
+
+    with patch("navaar.sync._base_push.identify_track") as mock_identify:
+        mock_identify.return_value = MagicMock(artist="Artist", title="Song", method="id3")
+        sync = TgToYtSync(track_repo, sync_log_repo, mock_tg_client, mock_yt_client)
+        assert await sync.process_pending() == 0
+        assert await sync.process_pending() == 0  # paused: no second attempt
+
+    assert mock_yt_client.find_best_match.call_count == 1  # stopped at the first refusal
+    assert mock_yt_client.get_playlist_tracks.call_count == 1
+    for track_id in ids:
+        track = await track_repo.get_track(track_id)
+        assert track.status == "pending"
+        assert track.retry_count == 0
+
+    # Once the pause lapses (quota reset), the queue resumes by itself.
+    sync._quota_paused_until = 0.0
+    mock_yt_client.find_best_match = MagicMock(return_value={"videoId": "v1", "title": "Song"})
+    with patch("navaar.sync._base_push.identify_track") as mock_identify:
+        mock_identify.return_value = MagicMock(artist="Artist", title="Song", method="id3")
+        assert await sync.process_pending() == 3
+
+
+@pytest.mark.asyncio
+async def test_quota_exhausted_on_playlist_fetch_pauses_without_crashing(
+    track_repo: TrackRepository,
+    sync_log_repo: SyncLogRepository,
+    mock_tg_client: MagicMock,
+    mock_yt_client: MagicMock,
+) -> None:
+    await track_repo.create_track(
+        direction="tg_to_yt", status="pending", title="Song", artist="A", tg_file_id="f"
+    )
+    mock_yt_client.get_playlist_tracks = MagicMock(side_effect=_quota_exc())
+    sync = TgToYtSync(track_repo, sync_log_repo, mock_tg_client, mock_yt_client)
+
+    assert await sync.process_pending() == 0
+    assert await sync.process_pending() == 0
+    assert mock_yt_client.get_playlist_tracks.call_count == 1
+    mock_yt_client.find_best_match.assert_not_called()

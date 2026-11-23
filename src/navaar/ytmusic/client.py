@@ -39,6 +39,8 @@ class YTMusicClient:
         # leave it as invalid JSON, which crashes the *next* boot (the file is the
         # only copy of the refresh token).
         self._token_lock = threading.Lock()
+        # videoId -> duration seconds; durations are immutable, so cache forever.
+        self._durations: dict[str, int] = {}
         self._token = self._load_token()
         self._ensure_fresh_token()
 
@@ -194,13 +196,16 @@ class YTMusicClient:
 
         # playlistItems does not return duration, but the fan-out to Spotify needs
         # it to verify it is the same recording (a title-only match lets a cover
-        # take the slot). One videos.list call per 50 ids.
+        # take the slot). One videos.list call per 50 ids — but only for ids not
+        # seen before: a video's duration never changes, and re-fetching all of
+        # them on every 2-minute poll doubled the poll's quota cost (one unit per
+        # 50 ids on top of one per playlist page, 720 polls a day).
         video_ids = [t["videoId"] for t in tracks if t.get("videoId")]
-        durations: dict[str, int] = {}
-        for i in range(0, len(video_ids), 50):
-            durations.update(self._fetch_durations(video_ids[i : i + 50]))
+        missing = [v for v in dict.fromkeys(video_ids) if v not in self._durations]
+        for i in range(0, len(missing), 50):
+            self._durations.update(self._fetch_durations(missing[i : i + 50]))
         for track in tracks:
-            track["duration_seconds"] = durations.get(track["videoId"])
+            track["duration_seconds"] = self._durations.get(track["videoId"])
 
         logger.debug("yt_playlist_fetched", track_count=len(tracks))
         return tracks

@@ -274,6 +274,28 @@ spotify"), or DM the bot (admin-gated; "how many failed tracks are there?").
   classified centrally. Tenacity uses `retry_if_transient` so the clients don't waste attempts
   retrying a revoked token. The engine's crash handler classifies the service, increments
   `AUTH_ERRORS{service}`, and tags the error `auth_error` (vs `cycle_crash`).
+- **Quota errors** (`auth_errors.is_quota_error`): HTTP 429, or a 403 whose body names a Google
+  quota reason (`quotaExceeded`, `rateLimitExceeded`, …). The YouTube Data API reports its
+  daily quota as a **403**, which used to be classified as a revoked token ("🔐 AUTH FAILURE …
+  re-auth required"). Quota errors are not auth errors, are not retried by tenacity, and are
+  metered as `error_type="quota"`.
+  - **Push directions** (`BasePushSync`): a quota error puts the track back to `pending`, leaves
+    the rest queued, and pauses that direction until `quota_retry_after(exc)` (Google per-day
+    quota → next midnight Pacific; `Retry-After` header honoured; otherwise 2–5 min). Paused
+    cycles return 0 without any API call, so `/readyz` stays green and nothing alerts. A bulk
+    post therefore drains a day's quota at a time instead of burning every remaining track to
+    `failed` (failed rows are never retried automatically). The pause is in-memory (a restart
+    costs one refused call to re-learn it).
+  - **Pull directions** crash to the engine as before, alerting "⏳ API QUOTA EXHAUSTED" once per
+    incident (no 30-minute "still failing" reminders — it only clears at the reset; the
+    signature drops the URL query so varying page tokens don't re-alert), then "recovered".
+  - **YouTube limits for the project** (`n8n-integration-456918`, default, readable via the
+    Service Usage API): **10,000 units/day** and, separately, **100 `search.list` calls/day**
+    (+100/min). The search cap binds first — `find_best_match` makes 1–3 searches per track, so
+    at most ~100 tracks/day can be matched (tg_to_yt + sp_to_yt + bot `/search` share it). A
+    normal day uses ~3k units (the yt_to_tg poll reads every playlist page each cycle, 720
+    polls/day; `YTMusicClient` caches video durations so `videos.list` runs only for new ids);
+    each `playlistItems.insert` costs 50.
 - **Engine backoff/circuit breaker**: `SyncEngine` tracks consecutive failures per direction,
   applies exponential backoff to the next sleep (capped by `backoff_max_seconds`), and sets
   `DIRECTION_HEALTH{direction}=0` after `circuit_open_after` crashes. One bad credential degrades

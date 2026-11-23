@@ -5,8 +5,9 @@ import time
 from dataclasses import dataclass
 
 import structlog
+from tenacity import RetryError
 
-from navaar.auth_errors import is_permanent_auth_error
+from navaar.auth_errors import is_permanent_auth_error, is_quota_error
 
 logger = structlog.get_logger()
 
@@ -57,6 +58,20 @@ class AlertNotifier:
         first_line = str(exc).splitlines()[0] if str(exc) else ""
         return f"{type(exc).__name__}: {first_line[:160]}"
 
+    @staticmethod
+    def _quota_signature(exc: BaseException) -> str:
+        # The failing URL carries a per-call query (search terms, page token, video
+        # ids); keep only host+path so one quota incident keeps one signature and
+        # doesn't re-alert as "changed" on every cycle.
+        if isinstance(exc, RetryError):
+            exc = exc.last_attempt.exception() or exc
+        try:
+            url = exc.request.url  # httpx errors carry the request
+        except Exception:
+            url = None
+        where = f" ({url.host}{url.path})" if url is not None else ""
+        return f"API quota/rate limit exhausted{where}"
+
     async def record_crash(self, direction: str, exc: BaseException) -> None:
         """Called from the engine crash handler. Never raises."""
         if not self._enabled:
@@ -64,21 +79,27 @@ class AlertNotifier:
         try:
             st = self._state.setdefault(direction, _DirState())
             st.consecutive += 1
-            sig = self._signature(exc)
-            auth = is_permanent_auth_error(exc)
+            quota = is_quota_error(exc)
+            sig = self._quota_signature(exc) if quota else self._signature(exc)
+            auth = not quota and is_permanent_auth_error(exc)
             threshold = 1 if auth else self._threshold
             now = time.time()
 
             new_incident = not st.alert_open and st.consecutive >= threshold
             sig_changed = st.alert_open and sig != st.signature
-            cooldown_done = st.alert_open and (now - st.last_alert_ts) >= self._cooldown
+            # A spent quota only clears at its reset (hours away for YouTube), so
+            # "still failing" reminders every cooldown are pure noise: alert once,
+            # then the "recovered" message closes it.
+            cooldown_done = (
+                st.alert_open and not quota and (now - st.last_alert_ts) >= self._cooldown
+            )
 
             if new_incident or sig_changed or cooldown_done:
                 st.alert_open = True
                 st.signature = sig
                 st.last_alert_ts = now
                 reminder = cooldown_done and not sig_changed and not new_incident
-                await self._send(self._format(direction, st, sig, auth, reminder))
+                await self._send(self._format(direction, st, sig, auth, reminder, quota))
         except Exception:
             logger.warning("alert_record_crash_failed", direction=direction, exc_info=True)
 
@@ -99,15 +120,26 @@ class AlertNotifier:
         except Exception:
             logger.warning("alert_record_success_failed", direction=direction, exc_info=True)
 
-    def _format(self, direction, st, sig, auth, reminder) -> str:
+    def _format(self, direction, st, sig, auth, reminder, quota=False) -> str:
         label = _DIR_LABEL.get(direction, direction)
         if reminder:
             head = "🔁 STILL FAILING"
+        elif quota:
+            head = "⏳ API QUOTA EXHAUSTED"
         elif auth:
             head = "🔐 AUTH FAILURE"
         else:
             head = "🚨 SYNC FAILURE"
-        hint = "\nLikely a revoked/expired token — re-auth required." if auth else ""
+        if quota:
+            hint = (
+                "\nThe service's API quota/rate limit is spent — no re-auth needed. "
+                "Pending tracks wait and resume on their own (YouTube's daily quota "
+                "resets at midnight Pacific)."
+            )
+        elif auth:
+            hint = "\nLikely a revoked/expired token — re-auth required."
+        else:
+            hint = ""
         return (
             f"<b>{head}: {label}</b>\n"
             f"Consecutive crashes: <b>{st.consecutive}</b>\n"
