@@ -33,7 +33,8 @@ data:
   # SDK runs Claude Code inside the pod, pointed at the Anthropic endpoint. It has
   # full Bash/file tools (runs as uid 1000 next to the DB and tokens) — accepted.
   NAVAAR_NL_AGENT_ENABLED: "true"
-  NAVAAR_NL_MODEL: "claude-sonnet-5-5"
+  # Bare id = Claude Code's standard ~200K context; "claude-opus-5-5[1m]" would opt into 1M.
+  NAVAAR_NL_MODEL: "claude-opus-5-5"
   # Reasoning effort (low|medium|high|xhigh|max). Sonnet 5.5's Claude Code default is
   # medium; set explicitly so it can't drift with a future CLI default change.
   NAVAAR_NL_EFFORT: "medium"
